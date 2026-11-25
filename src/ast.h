@@ -90,7 +90,7 @@ typedef struct {
     AstSpan name;
     AstNodeRange parameters;  // Range in children.
     AstNodeId return_type;    // AST_NODE_NONE for a function without a result.
-    AstNodeId body;
+    AstNodeId body;           // AST_NODE_NONE for an external function.
 } AstFunction;
 
 typedef struct {

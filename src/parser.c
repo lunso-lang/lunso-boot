@@ -498,7 +498,10 @@ static AstNodeRange parse_parameters(Parser *parser)
 
 static AstNodeId parse_function(Parser *parser)
 {
-    Token keyword = expect(parser, TOKEN_FUN, "expected a function declaration");
+    Token start = parser->current;
+    bool external = match(parser, TOKEN_EXT);
+    expect(parser, TOKEN_FUN, external ? "expected 'fun' after 'ext'"
+                                      : "expected a function declaration");
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a function name");
     AstFunction function = {
         .name = {(uint32_t)name.offset, (uint32_t)name.length},
@@ -507,13 +510,17 @@ static AstNodeId parse_function(Parser *parser)
     if (match(parser, TOKEN_COLON)) {
         function.return_type = parse_type(parser);
     }
-    function.body = parse_block(parser);
+    if (!external) {
+        function.body = parse_block(parser);
+    } else if (parser->current.kind == TOKEN_LEFT_BRACE) {
+        fail(parser, "an external function declaration cannot have a body");
+    }
 
     uint32_t index = 0;
     if (!failed(parser) && !ast_add_function(&parser->builder, function, &index)) {
         fail(parser, "could not allocate AST storage");
     }
-    return add_node(parser, AST_FUNCTION, keyword, index, 0);
+    return add_node(parser, AST_FUNCTION, start, index, 0);
 }
 
 bool parser_parse(const unsigned char *source, size_t length, Ast *out, ParseError *error)

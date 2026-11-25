@@ -158,18 +158,24 @@ bool ir_write(FILE *output, const IrModule *module)
         if (i) {
             fputc('\n', output);
         }
-        fputs("fun @", output);
+        fputs(fn.external ? "ext fun @" : "fun @", output);
         write_span(output, module, fn.name);
         fputc('(', output);
         for (uint32_t p = 0; p < fn.parameter_count; p++) {
             if (p) {
                 fputs(", ", output);
             }
-            fprintf(output, "$%" PRIu32 ": ", p);
+            if (!fn.external) {
+                fprintf(output, "$%" PRIu32 ": ", p);
+            }
             write_type(output, module->parameters[fn.first_parameter + p]);
         }
         fputs("): ", output);
         write_type(output, fn.result);
+        if (fn.external) {
+            fputc('\n', output);
+            continue;
+        }
         fprintf(output, " [slots %" PRIu32 "] {\n", fn.slot_count);
         for (uint32_t j = 0; j < fn.instruction_count; j++) {
             write_instruction(output, module, module->instructions[fn.first_instruction + j]);

@@ -1,0 +1,7 @@
+ext fun putchar(character: i32): i32
+
+fun main(): i32 {
+    putchar(65)
+    putchar(10)
+    return 0
+}

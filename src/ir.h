@@ -31,6 +31,7 @@ typedef struct {
     uint32_t first_parameter, parameter_count;
     uint32_t first_instruction, instruction_count;
     uint32_t slot_count;
+    bool external;
 } IrFunction;
 
 typedef struct {

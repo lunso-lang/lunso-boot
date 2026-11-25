@@ -639,11 +639,13 @@ static void check_function(Checker *checker, uint32_t index)
         AstNodeId param = ast->children[function.parameters.first + i];
         bind_local(checker, param, node_span(ast, param), checker->sema->nodes[param].type);
     }
-    bool falls = check_block(checker, function.body);
-    if (falls && info->result.kind != TYPE_VOID) {
-        fail_at(checker, function.name.offset, "function can finish without returning a value");
+    if (function.body) {
+        bool falls = check_block(checker, function.body);
+        if (falls && info->result.kind != TYPE_VOID) {
+            fail_at(checker, function.name.offset, "function can finish without returning a value");
+        }
+        info->slot_count = checker->next_slot;
     }
-    info->slot_count = checker->next_slot;
 }
 
 void sema_destroy(Sema *sema)

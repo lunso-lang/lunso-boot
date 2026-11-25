@@ -73,6 +73,7 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
 {
     static const char *const names[] = {
         [TOKEN_FUN] = "FUN",
+        [TOKEN_EXT] = "EXT",
         [TOKEN_RETURN] = "RETURN",
         [TOKEN_IF] = "IF",
         [TOKEN_ELSE] = "ELSE",

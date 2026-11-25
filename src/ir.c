@@ -364,10 +364,14 @@ static void lower_function(Lowering *lowering, uint32_t index)
         .parameter_count = function.parameters.count,
         .first_instruction = module->instruction_count,
         .slot_count = checked.slot_count,
+        .external = function.body == AST_NODE_NONE,
     };
     for (uint32_t i = 0; i < function.parameters.count; i++) {
         AstNodeId param = ast->children[function.parameters.first + i];
         module->parameters[module->parameter_count++] = lowering->sema->nodes[param].type;
+    }
+    if (output->external) {
+        return;
     }
 
     lowering->function = output;

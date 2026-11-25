@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -47,6 +48,7 @@ class TestPassPrograms(unittest.TestCase):
         directives = parse_directives(path)
         expected_exit = int(directives.get("expect-exit", "0"))
         expected_stdout = directives.get("expect-stdout")
+        extra_args = shlex.split(directives["args"]) if "args" in directives else []
 
         with tempfile.TemporaryDirectory() as tmp:
             workdir = Path(tmp)
@@ -62,7 +64,7 @@ class TestPassPrograms(unittest.TestCase):
                 f"build failed for {path.relative_to(ROOT)}:\n{build_res.stderr}",
             )
 
-            run_res = run_cmd([exe_path], cwd=workdir)
+            run_res = run_cmd([exe_path, *extra_args], cwd=workdir)
             self.assertEqual(
                 run_res.returncode,
                 expected_exit,

@@ -69,6 +69,7 @@ static TokenKind scan_identifier(Lexer *lexer, size_t start)
         {"fun", TOKEN_FUN},
         {"ext", TOKEN_EXT},
         {"struct", TOKEN_STRUCT},
+        {"enum", TOKEN_ENUM},
         {"as", TOKEN_AS},
         {"const", TOKEN_CONST},
         {"import", TOKEN_IMPORT},

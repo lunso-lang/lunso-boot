@@ -113,6 +113,23 @@ bool ast_add_struct(AstBuilder *builder, AstStruct record, uint32_t *index)
     return true;
 }
 
+bool ast_add_enum(AstBuilder *builder, AstEnum enumeration, uint32_t *index)
+{
+    Ast *ast = &builder->ast;
+    if (ast->enum_count == UINT32_MAX) {
+        return false;
+    }
+    AstEnum *enums = reserve(ast->enums, &builder->enum_capacity,
+                           ast->enum_count + 1, sizeof(*enums));
+    if (!enums) {
+        return false;
+    }
+    ast->enums = enums;
+    *index = ast->enum_count++;
+    enums[*index] = enumeration;
+    return true;
+}
+
 bool ast_add_import(AstBuilder *builder, AstImport item, uint32_t *index)
 {
     Ast *ast = &builder->ast;
@@ -227,6 +244,7 @@ void ast_destroy(Ast *ast)
     free(ast->children);
     free(ast->functions);
     free(ast->structs);
+    free(ast->enums);
     free(ast->imports);
     free(ast->if_branches);
     free(ast->for_headers);

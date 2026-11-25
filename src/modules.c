@@ -326,6 +326,12 @@ static bool declaration_name(const Ast *ast, AstNodeId id, AstSpan *name,
         *kind = BIND_STRUCT;
         return true;
     }
+    if (ast->kinds[id] == AST_ENUM) {
+        *name = ast->enums[index].name;
+        *public = ast->enums[index].public;
+        *kind = BIND_ENUM;
+        return true;
+    }
     return false;
 }
 
@@ -568,7 +574,7 @@ static bool load_import(Loader *loader, uint32_t owner, AstNodeId id)
     return false;
 }
 
-static bool add_qualified(Loader *loader, AstNodeId node, AstBindingKind kind, uint32_t index)
+static bool add_qualified(Loader *loader, AstQualified reference)
 {
     Ast *ast = &loader->builder.ast;
     AstQualified *references = NULL;
@@ -577,10 +583,10 @@ static bool add_qualified(Loader *loader, AstNodeId node, AstBindingKind kind, u
                              sizeof(*references));
     }
     if (!references) {
-        return out_of_memory(loader, ast->positions[node]);
+        return out_of_memory(loader, ast->positions[reference.node]);
     }
     ast->qualified = references;
-    references[ast->qualified_count++] = (AstQualified){node, index, kind};
+    references[ast->qualified_count++] = reference;
     return true;
 }
 
@@ -588,6 +594,7 @@ static bool qualify(Loader *loader, uint32_t owner, AstNodeId id, const AstSpan 
                     uint32_t count, AstBindingKind expected)
 {
     const Ast *ast = &loader->builder.ast;
+    bool optional = expected == BIND_ENUM;
     char *first = copy_name(ast, parts[0]);
     if (!first) {
         return out_of_memory(loader, parts[0].offset);
@@ -595,7 +602,7 @@ static bool qualify(Loader *loader, uint32_t owner, AstNodeId id, const AstSpan 
     const AstBinding *binding = binding_named(&loader->modules[owner], first);
     free(first);
     if (!binding || binding->kind != BIND_MODULE) {
-        return expected == BIND_FUNCTION || error(loader, parts[0].offset, "unknown module name");
+        return expected != BIND_STRUCT || error(loader, parts[0].offset, "unknown module name");
     }
 
     uint32_t target = binding->index;
@@ -610,7 +617,7 @@ static bool qualify(Loader *loader, uint32_t owner, AstNodeId id, const AstSpan 
             return false;
         }
         if (target == NO_MODULE) {
-            return error(loader, parts[i].offset, "unknown submodule");
+            return optional || error(loader, parts[i].offset, "unknown submodule");
         }
     }
     AstSpan requested = parts[count - 1];
@@ -623,21 +630,38 @@ static bool qualify(Loader *loader, uint32_t owner, AstNodeId id, const AstSpan 
         AstSpan name;
         AstBindingKind kind;
         bool public;
-        if (!declaration_name(ast, declaration, &name, &kind, &public) || kind != expected ||
+        if (!declaration_name(ast, declaration, &name, &kind, &public) ||
+            (kind != expected && !(expected == BIND_STRUCT && kind == BIND_ENUM)) ||
             name.length != requested.length ||
             memcmp(ast->source + name.offset, ast->source + requested.offset, name.length)) {
             continue;
         }
-        if (!public && owner != target) {
+        bool inaccessible = !public && owner != target;
+        if (inaccessible && !optional) {
             return error(loader, requested.offset, "cannot access a private declaration");
         }
-        return add_qualified(loader, id, kind, ast->data[declaration].a);
+        return add_qualified(loader, (AstQualified){id, ast->data[declaration].a, kind, inaccessible});
     }
-    return error(loader, requested.offset, expected == BIND_STRUCT
+    return optional || error(loader, requested.offset, expected == BIND_STRUCT
                  ? "unknown type in module" : "unknown function in module");
 }
 
-static bool resolve_references(Loader *loader, uint32_t owner, AstNodeId first, uint32_t end)
+static uint32_t member_path(const Ast *ast, AstNodeId id, AstSpan *parts)
+{
+    uint32_t start = MAX_MODULE_DEPTH;
+    while (ast->kinds[id] == AST_MEMBER && start > 1) {
+        parts[--start] = (AstSpan){ast->positions[id], ast->data[id].b};
+        id = ast->data[id].a;
+    }
+    if (start == MAX_MODULE_DEPTH || ast->kinds[id] != AST_IDENTIFIER) {
+        return MAX_MODULE_DEPTH;
+    }
+    parts[--start] = item_name(ast, id);
+    return start;
+}
+
+static bool resolve_references(Loader *loader, uint32_t owner, AstNodeId first, uint32_t end,
+                               const bool *member_prefixes)
 {
     const Ast *ast = &loader->builder.ast;
     AstSpan parts[MAX_MODULE_DEPTH];
@@ -653,18 +677,15 @@ static bool resolve_references(Loader *loader, uint32_t owner, AstNodeId first, 
             if (!qualify(loader, owner, id, parts, node.b, BIND_STRUCT)) {
                 return false;
             }
-        } else if (ast->kinds[id] == AST_CALL) {
-            AstNodeId callee = ast->children[node.a];
-            uint32_t start = MAX_MODULE_DEPTH;
-            while (ast->kinds[callee] == AST_MEMBER && start > 1) {
-                parts[--start] = (AstSpan){ast->positions[callee], ast->data[callee].b};
-                callee = ast->data[callee].a;
-            }
-            if (start != MAX_MODULE_DEPTH && ast->kinds[callee] == AST_IDENTIFIER) {
-                parts[--start] = item_name(ast, callee);
-                if (!qualify(loader, owner, id, parts + start, MAX_MODULE_DEPTH - start, BIND_FUNCTION)) {
-                    return false;
-                }
+        } else if (ast->kinds[id] == AST_CALL ||
+                   (ast->kinds[id] == AST_MEMBER && !member_prefixes[id - first])) {
+            bool call = ast->kinds[id] == AST_CALL;
+            uint32_t start = member_path(ast, call ? ast->children[node.a] : id, parts);
+            uint32_t count = MAX_MODULE_DEPTH - start;
+            if ((call ? count >= 2 : count >= 3) &&
+                !qualify(loader, owner, id, parts + start, call ? count : count - 1,
+                         call ? BIND_FUNCTION : BIND_ENUM)) {
+                return false;
             }
         }
     }
@@ -698,7 +719,29 @@ static bool finish_module(Loader *loader, uint32_t module, AstNodeId first, uint
             return false;
         }
     }
-    return resolve_references(loader, module, first, end);
+    if (first >= end) {
+        return true;
+    }
+    bool *member_prefixes = calloc(end - first, sizeof(*member_prefixes));
+    if (!member_prefixes) {
+        return out_of_memory(loader, ast->positions[first]);
+    }
+    for (AstNodeId id = first; id < end; id++) {
+        AstNodeId prefix;
+        if (ast->kinds[id] == AST_MEMBER) {
+            prefix = ast->data[id].a;
+        } else if (ast->kinds[id] == AST_CALL) {
+            prefix = ast->children[ast->data[id].a];
+        } else {
+            continue;
+        }
+        if (ast->kinds[prefix] == AST_MEMBER) {
+            member_prefixes[prefix - first] = true;
+        }
+    }
+    bool ok = resolve_references(loader, module, first, end, member_prefixes);
+    free(member_prefixes);
+    return ok;
 }
 
 static bool load_module(Loader *loader, uint32_t module, uint32_t owner, uint32_t offset)

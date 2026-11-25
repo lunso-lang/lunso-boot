@@ -22,6 +22,8 @@ enum {
 
     AST_FUNCTION,   // a: functions index
     AST_STRUCT,     // a: structs index
+    AST_ENUM,       // a: enums index
+    AST_ENUM_CASE,  // a: name length, b: optional signed integer literal
     AST_IMPORT,     // a: imports index
     AST_IMPORT_ITEM, // a: name length, b: alias identifier or AST_NODE_NONE
     AST_FIELD,      // a: name length, b: type node
@@ -115,6 +117,14 @@ typedef struct {
     bool public;
 } AstStruct;
 
+typedef struct {
+    AstSpan name;
+    AstNodeRange cases;
+    AstNodeId backing;
+    uint32_t module;
+    bool public;
+} AstEnum;
+
 typedef enum { IMPORT_MODULE, IMPORT_ALL, IMPORT_SELECTED } AstImportKind;
 
 typedef struct {
@@ -124,7 +134,7 @@ typedef struct {
     AstImportKind kind;
 } AstImport;
 
-typedef enum { BIND_MODULE, BIND_FUNCTION, BIND_STRUCT } AstBindingKind;
+typedef enum { BIND_MODULE, BIND_FUNCTION, BIND_STRUCT, BIND_ENUM } AstBindingKind;
 
 typedef struct {
     char *name;
@@ -142,6 +152,7 @@ typedef struct {
     AstNodeId node;
     uint32_t index;
     AstBindingKind kind;
+    bool inaccessible;
 } AstQualified;
 
 typedef struct {
@@ -181,6 +192,8 @@ typedef struct {
     uint32_t function_count;
     AstStruct *structs;
     uint32_t struct_count;
+    AstEnum *enums;
+    uint32_t enum_count;
     AstImport *imports;
     uint32_t import_count;
     AstIfBranches *if_branches;

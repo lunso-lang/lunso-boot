@@ -182,7 +182,7 @@ static bool is_separator(TokenKind kind)
 
 static void finish_item(Parser *parser, TokenKind end, const char *message)
 {
-    if (!failed(parser) && parser->current.kind != end &&
+    if (message && !failed(parser) && parser->current.kind != end &&
         !is_separator(parser->current.kind)) {
         fail(parser, message);
     }
@@ -638,6 +638,52 @@ static AstNodeId parse_struct(Parser *parser, bool public)
     return add_node(parser, AST_STRUCT, keyword, index, 0);
 }
 
+static AstNodeId parse_enum(Parser *parser, bool public)
+{
+    Token keyword = expect(parser, TOKEN_ENUM, "expected 'enum'");
+    Token name = expect(parser, TOKEN_IDENTIFIER, "expected an enum name");
+    expect(parser, TOKEN_COLON, "expected ':' before enum backing type");
+    Token type = expect(parser, TOKEN_IDENTIFIER, "expected an integer backing type");
+    AstNodeId backing = add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
+    expect(parser, TOKEN_LEFT_BRACE, "expected '{' after enum backing type");
+
+    uint32_t mark = parser->builder->pending_count;
+    while (!failed(parser) && is_separator(parser->current.kind)) {
+        advance(parser);
+    }
+    while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_BRACE &&
+           parser->current.kind != TOKEN_EOF) {
+        Token member = expect(parser, TOKEN_IDENTIFIER, "expected an enum member name");
+        AstNodeId value = AST_NODE_NONE;
+        if (match(parser, TOKEN_EQUAL)) {
+            Token sign = parser->current;
+            bool negative = match(parser, TOKEN_MINUS);
+            Token literal = expect(parser, TOKEN_INTEGER, "expected an integer enum value");
+            value = add_node(parser, AST_INTEGER, literal, (uint32_t)literal.length, 0);
+            if (negative) {
+                value = add_node(parser, AST_NEGATE, sign, value, 0);
+            }
+        }
+        push_child(parser, add_node(parser, AST_ENUM_CASE, member, (uint32_t)member.length, value));
+        const char *separator = match(parser, TOKEN_COMMA)
+                                ? NULL : "expected ',', a newline, ';', or '}' after enum member";
+        finish_item(parser, TOKEN_RIGHT_BRACE, separator);
+    }
+    expect(parser, TOKEN_RIGHT_BRACE, "expected '}' after enum");
+    AstEnum enumeration = {
+        .name = source_span(parser, name),
+        .cases = finish_children(parser, mark),
+        .backing = backing,
+        .module = parser->module,
+        .public = public,
+    };
+    uint32_t index = 0;
+    if (!failed(parser) && !ast_add_enum(parser->builder, enumeration, &index)) {
+        fail(parser, "could not allocate AST storage");
+    }
+    return add_node(parser, AST_ENUM, keyword, index, 0);
+}
+
 static AstNodeId parse_import(Parser *parser)
 {
     Token keyword = expect(parser, TOKEN_IMPORT, "expected 'import'");
@@ -700,10 +746,20 @@ bool parser_append(AstBuilder *builder, const unsigned char *source, uint32_t le
             if (!public) {
                 match(&parser, TOKEN_PRIV);
             }
-            bool record = parser.current.kind == TOKEN_STRUCT;
-            declaration = record ? parse_struct(&parser, public) : parse_function(&parser, public);
-            message = record ? "expected a newline or ';' after struct"
-                             : "expected a newline or ';' after function";
+            switch (parser.current.kind) {
+            case TOKEN_STRUCT:
+                declaration = parse_struct(&parser, public);
+                message = NULL;
+                break;
+            case TOKEN_ENUM:
+                declaration = parse_enum(&parser, public);
+                message = NULL;
+                break;
+            default:
+                declaration = parse_function(&parser, public);
+                message = "expected a newline or ';' after function";
+                break;
+            }
         }
         push_child(&parser, declaration);
         finish_item(&parser, TOKEN_EOF, message);

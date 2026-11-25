@@ -10,6 +10,7 @@ typedef struct {
     uint32_t child_capacity;
     uint32_t function_capacity;
     uint32_t struct_capacity;
+    uint32_t enum_capacity;
     uint32_t import_capacity;
     uint32_t if_branch_capacity;
     uint32_t for_header_capacity;
@@ -22,6 +23,7 @@ typedef struct {
 AstNodeId ast_add_node(AstBuilder *builder, AstKind kind, uint32_t position, AstNodeData data);
 bool ast_add_function(AstBuilder *builder, AstFunction function, uint32_t *index);
 bool ast_add_struct(AstBuilder *builder, AstStruct record, uint32_t *index);
+bool ast_add_enum(AstBuilder *builder, AstEnum enumeration, uint32_t *index);
 bool ast_add_import(AstBuilder *builder, AstImport item, uint32_t *index);
 bool ast_add_if_branches(AstBuilder *builder, AstIfBranches branches, uint32_t *index);
 bool ast_add_for_header(AstBuilder *builder, AstForHeader header, uint32_t *index);

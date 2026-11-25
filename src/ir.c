@@ -3,6 +3,11 @@
 #include <stdlib.h>
 
 typedef struct {
+    uint32_t break_label;
+    uint32_t continue_label;
+} IrLoop;
+
+typedef struct {
     const Ast *ast;
     const Sema *sema;
     IrModule *module;
@@ -11,8 +16,8 @@ typedef struct {
     uint32_t argument_capacity;
     uint32_t next_value;
     uint32_t next_label;
-    uint32_t loop_break;
-    uint32_t loop_continue;
+    IrLoop loops[256];
+    uint32_t loop_depth;
     bool failed;
 } Lowering;
 
@@ -466,13 +471,12 @@ static void lower_loop(Lowering *lowering, AstNodeId id)
         branch(lowering, condition, body, end);
         emit_label(lowering, body);
     }
-    uint32_t saved_break = lowering->loop_break;
-    uint32_t saved_continue = lowering->loop_continue;
-    lowering->loop_break = end;
-    lowering->loop_continue = continue_target;
+    lowering->loops[lowering->loop_depth++] = (IrLoop){
+        .break_label = end,
+        .continue_label = continue_target,
+    };
     lower_statement(lowering, data.b);
-    lowering->loop_break = saved_break;
-    lowering->loop_continue = saved_continue;
+    lowering->loop_depth--;
     if (header.step) {
         emit_label(lowering, continue_target);
         lower_expression(lowering, header.step);
@@ -515,10 +519,10 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
         lower_loop(lowering, id);
         break;
     case AST_BREAK:
-        jump(lowering, lowering->loop_break);
+        jump(lowering, lowering->loops[lowering->sema->nodes[id].binding].break_label);
         break;
     case AST_CONTINUE:
-        jump(lowering, lowering->loop_continue);
+        jump(lowering, lowering->loops[lowering->sema->nodes[id].binding].continue_label);
         break;
     case AST_VAR: {
         SemaNode info = lowering->sema->nodes[id];

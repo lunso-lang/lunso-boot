@@ -251,7 +251,7 @@ static void emit_expr(StrBuf *sb, int depth)
 
 static void emit_stmt(StrBuf *sb, int depth)
 {
-    switch (rng_range(depth > 0 ? 8 : 3)) {
+    switch (rng_range(depth > 0 ? 9 : 3)) {
     case 0: {
         int form = (int)rng_range(3);
         sb_append(sb, "var v%zu", rng_range(5));
@@ -304,6 +304,15 @@ static void emit_stmt(StrBuf *sb, int depth)
         break;
     case 7:
         sb_append(sb, "continue\n");
+        break;
+    case 8:
+        sb_append(sb, "lbl%d: for x < 3 {\n", depth);
+        if (rng_range(2) == 0) {
+            sb_append(sb, "break lbl%d\n", depth);
+        } else {
+            sb_append(sb, "continue lbl%d\n", depth);
+        }
+        sb_append(sb, "}\n");
         break;
     }
 }

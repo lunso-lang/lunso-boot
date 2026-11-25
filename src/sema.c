@@ -12,6 +12,11 @@ typedef struct {
 } Local;
 
 typedef struct {
+    AstSpan label;
+    bool broke;
+} LoopInfo;
+
+typedef struct {
     const Ast *ast;
     Sema *sema;
     SemaError error;
@@ -31,8 +36,8 @@ typedef struct {
     SemaType result;
     uint32_t module;
     unsigned depth;
+    LoopInfo loops[256];
     uint32_t loop_depth;
-    bool loop_broke;
 } Checker;
 
 typedef struct {
@@ -1571,16 +1576,47 @@ static bool check_loop(Checker *checker, AstNodeId id)
     if (header.step) {
         check_expr(checker, header.step, no_type);
     }
-    uint32_t saved_depth = checker->loop_depth;
-    bool saved_broke = checker->loop_broke;
-    checker->loop_depth++;
-    checker->loop_broke = false;
+    if (header.label.length > 0) {
+        for (uint32_t i = 0; i < checker->loop_depth; i++) {
+            if (checker->loops[i].label.length > 0 &&
+                same_name(ast, header.label, checker->loops[i].label)) {
+                fail_at(checker, header.label.offset, "duplicate loop label");
+                close_scope(checker, scope);
+                return false;
+            }
+        }
+    }
+    if (checker->loop_depth >= MAX_ANALYSIS_DEPTH) {
+        fail(checker, id, "loop nesting is too deep");
+        close_scope(checker, scope);
+        return false;
+    }
+    checker->loops[checker->loop_depth++] = (LoopInfo){.label = header.label, .broke = false};
     check_statement(checker, node.b);
-    bool broke = checker->loop_broke;
-    checker->loop_depth = saved_depth;
-    checker->loop_broke = saved_broke;
+    bool broke = checker->loops[--checker->loop_depth].broke;
     close_scope(checker, scope);
     return header.condition != AST_NODE_NONE || broke;
+}
+
+static uint32_t resolve_loop_target(Checker *checker, AstNodeId id, bool is_break)
+{
+    if (checker->loop_depth == 0) {
+        fail(checker, id, is_break ? "break must be inside a loop" : "continue must be inside a loop");
+        return 0;
+    }
+    AstNodeId label_node = checker->ast->data[id].a;
+    if (label_node == AST_NODE_NONE) {
+        return checker->loop_depth - 1;
+    }
+    AstSpan label = node_span(checker->ast, label_node);
+    for (uint32_t i = checker->loop_depth; i > 0; i--) {
+        LoopInfo *info = &checker->loops[i - 1];
+        if (info->label.length > 0 && same_name(checker->ast, label, info->label)) {
+            return i - 1;
+        }
+    }
+    fail(checker, label_node, "unknown loop label");
+    return 0;
 }
 
 static bool statement_falls_through(Checker *checker, AstNodeId id)
@@ -1613,18 +1649,21 @@ static bool statement_falls_through(Checker *checker, AstNodeId id)
     case AST_FOR:
     case AST_FOR_C_STYLE:
         return check_loop(checker, id);
-    case AST_BREAK:
-        if (checker->loop_depth == 0) {
-            fail(checker, id, "break must be inside a loop");
-        } else {
-            checker->loop_broke = true;
+    case AST_BREAK: {
+        uint32_t target = resolve_loop_target(checker, id, true);
+        if (!failed(checker)) {
+            checker->sema->nodes[id].binding = target;
+            checker->loops[target].broke = true;
         }
         return false;
-    case AST_CONTINUE:
-        if (checker->loop_depth == 0) {
-            fail(checker, id, "continue must be inside a loop");
+    }
+    case AST_CONTINUE: {
+        uint32_t target = resolve_loop_target(checker, id, false);
+        if (!failed(checker)) {
+            checker->sema->nodes[id].binding = target;
         }
         return false;
+    }
     case AST_VAR:
         check_variable(checker, id);
         return true;
@@ -1656,7 +1695,6 @@ static void check_function(Checker *checker, uint32_t index)
     checker->scope_start = 0;
     checker->next_slot = 0;
     checker->loop_depth = 0;
-    checker->loop_broke = false;
     for (uint32_t i = 0; i < function.parameters.count && !failed(checker); i++) {
         AstNodeId param = ast->children[function.parameters.first + i];
         bind_local(checker, param, node_span(ast, param), checker->sema->nodes[param].type);

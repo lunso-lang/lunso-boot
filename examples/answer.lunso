@@ -1,0 +1,11 @@
+fun main(): i32 {
+    var total: i32 = 0
+    for var i: i32; i < 6; i = i + 1 {
+        total += add(i, 2)
+    }
+    return total + 15
+}
+
+fun add(a: i32, b: i32): i32 {
+    return a + b
+}

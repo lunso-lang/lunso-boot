@@ -1,6 +1,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "sema.h"
+#include "ir.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -8,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK } Mode;
+typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR } Mode;
 
 static unsigned char *read_source(FILE *file, size_t *length)
 {
@@ -181,14 +182,28 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
         return report_source_error(path, source, error.token, error.message);
     }
 
-    if (mode == MODE_CHECK) {
+    int result = EXIT_SUCCESS;
+    if (mode == MODE_CHECK || mode == MODE_EMIT_IR) {
         Sema sema;
         SemaError semantic_error;
         if (!sema_check(&ast, &sema, &semantic_error)) {
             ast_destroy(&ast);
             return report_offset_error(path, source, semantic_error);
         }
-        printf("Checked %" PRIu32 " function(s)\n", ast.function_count);
+        if (mode == MODE_EMIT_IR) {
+            IrModule ir;
+            if (!ir_lower(&ast, &sema, &ir)) {
+                fprintf(stderr, "%s: could not allocate IR storage\n", path);
+                result = EXIT_FAILURE;
+            } else {
+                if (!ir_write(stdout, &ir)) {
+                    result = EXIT_FAILURE;
+                }
+                ir_destroy(&ir);
+            }
+        } else {
+            printf("Checked %" PRIu32 " function(s)\n", ast.function_count);
+        }
         sema_destroy(&sema);
     } else {
         uint32_t nodes = ast.node_count ? ast.node_count - 1 : 0;
@@ -196,7 +211,7 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
                ast.function_count, nodes);
     }
     ast_destroy(&ast);
-    return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
+    return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : result;
 }
 
 int main(int argc, char **argv)
@@ -206,9 +221,11 @@ int main(int argc, char **argv)
         mode = MODE_PARSE;
     } else if (argc > 1 && strcmp(argv[1], "--check") == 0) {
         mode = MODE_CHECK;
+    } else if (argc > 1 && strcmp(argv[1], "--emit-ir") == 0) {
+        mode = MODE_EMIT_IR;
     }
     if (argc != (mode == MODE_TOKENS ? 2 : 3)) {
-        fprintf(stderr, "usage: %s [--parse | --check] <source.lunso>\n", argv[0]);
+        fprintf(stderr, "usage: %s [--parse | --check | --emit-ir] <source.lunso>\n", argv[0]);
         return EXIT_FAILURE;
     }
 

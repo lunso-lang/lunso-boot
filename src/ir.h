@@ -39,12 +39,18 @@ typedef struct {
     uint32_t first_parameter, parameter_count;
     uint32_t first_instruction, instruction_count;
     uint32_t slot_count;
+    uint32_t module;
     bool external;
 } IrFunction;
 
 typedef struct {
+    AstSpan name;
+    uint32_t module;
+} IrStructName;
+
+typedef struct {
     const unsigned char *source;  // Borrowed for names and literal spellings.
-    AstSpan *struct_names;        // Indexed by SemaType.record.
+    IrStructName *struct_names;   // Indexed by SemaType.record.
     SemaType *pointees;            // Indexed by SemaType.pointee.
     IrFunction *functions;
     uint32_t function_count;
@@ -54,6 +60,7 @@ typedef struct {
     uint32_t instruction_count;
     uint32_t *arguments;
     uint32_t argument_count;
+    uint32_t module_count;
 } IrModule;
 
 // Requires successful semantic analysis of ast. The resulting IR borrows ast->source.

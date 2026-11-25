@@ -1,0 +1,11 @@
+pub struct Counter {
+    amount: i32
+}
+
+priv fun initial_value(): i32 {
+    return 1
+}
+
+pub fun value(counter: *Counter): i32 {
+    return (*counter).amount + initial_value()
+}

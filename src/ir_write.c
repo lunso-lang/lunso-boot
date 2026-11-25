@@ -7,6 +7,21 @@ static void write_span(FILE *output, const IrModule *module, AstSpan span)
     fwrite(module->source + span.offset, 1, span.length, output);
 }
 
+static void write_module_prefix(FILE *output, uint32_t module)
+{
+    if (module) {
+        fprintf(output, "m%" PRIu32 ".", module);
+    }
+}
+
+static void write_function_name(FILE *output, const IrModule *module, IrFunction function)
+{
+    if (!function.external) {
+        write_module_prefix(output, function.module);
+    }
+    write_span(output, module, function.name);
+}
+
 static void write_type(FILE *output, const IrModule *module, SemaType type)
 {
     TypeKind kind = type.kind;
@@ -23,7 +38,9 @@ static void write_type(FILE *output, const IrModule *module, SemaType type)
         kind = type.kind;
     }
     if (kind == TYPE_STRUCT) {
-        write_span(output, module, module->struct_names[type.record]);
+        IrStructName record = module->struct_names[type.record];
+        write_module_prefix(output, record.module);
+        write_span(output, module, record.name);
     } else {
         fputs(sema_type_name(kind), output);
     }
@@ -181,7 +198,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         fputs("call.", output);
         write_type(output, module, instruction.type);
         fputs(" @", output);
-        write_span(output, module, module->functions[instruction.a].name);
+        write_function_name(output, module, module->functions[instruction.a]);
         fputc('(', output);
         for (uint32_t i = 0; i < instruction.c; i++) {
             if (i) {
@@ -225,7 +242,7 @@ bool ir_write(FILE *output, const IrModule *module)
             fputc('\n', output);
         }
         fputs(fn.external ? "ext fun @" : "fun @", output);
-        write_span(output, module, fn.name);
+        write_function_name(output, module, fn);
         fputc('(', output);
         for (uint32_t p = 0; p < fn.parameter_count; p++) {
             if (p) {

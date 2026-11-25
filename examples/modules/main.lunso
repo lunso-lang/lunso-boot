@@ -1,0 +1,19 @@
+import std.*
+import json.io as json_io
+import std.io { Counter, value as counter_value }
+
+ext fun putchar(character: i32): i32
+
+fun main(): i32 {
+    var count: Counter
+    count.amount = 19
+
+    if counter_value(&count) + io.value(&count) + json_io.value() != 42 {
+        return 1
+    }
+
+    putchar(79)
+    putchar(75)
+    putchar(10)
+    return 0
+}

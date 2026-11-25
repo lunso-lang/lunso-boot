@@ -25,6 +25,7 @@ typedef struct {
     size_t scope_start;
     uint32_t next_slot;
     SemaType result;
+    uint32_t module;
     unsigned depth;
 } Checker;
 
@@ -207,10 +208,10 @@ static TypeKind scalar_type(const Ast *ast, AstSpan name)
     return TYPE_INVALID;
 }
 
-static uint32_t find_struct(const Ast *ast, AstSpan name)
+static uint32_t find_struct(const Ast *ast, uint32_t module, AstSpan name)
 {
     for (uint32_t i = 0; i < ast->struct_count; i++) {
-        if (same_name(ast, name, ast->structs[i].name)) {
+        if (ast->structs[i].module == module && same_name(ast, name, ast->structs[i].name)) {
             return i;
         }
     }
@@ -226,7 +227,8 @@ static void layout_struct(Checker *checker, uint32_t index)
 {
     const Ast *ast = checker->ast;
     AstStruct record = ast->structs[index];
-    if (scalar_type(ast, record.name) != TYPE_INVALID || find_struct(ast, record.name) != index) {
+    if (scalar_type(ast, record.name) != TYPE_INVALID ||
+        find_struct(ast, record.module, record.name) != index) {
         fail_at(checker, record.name.offset, "duplicate or reserved struct name");
         return;
     }
@@ -255,7 +257,7 @@ static void layout_struct(Checker *checker, uint32_t index)
         AstSpan field_type = node_span(ast, annotation);
         TypeKind kind = scalar_type(ast, field_type);
         if (kind == TYPE_INVALID) {
-            fail(checker, annotation, find_struct(ast, field_type) == UINT32_MAX
+            fail(checker, annotation, find_struct(ast, record.module, field_type) == UINT32_MAX
                                       ? "unknown type" : "struct fields must be scalar");
             return;
         }
@@ -281,6 +283,14 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         return void_type;
     }
     AstKind ast_kind = checker->ast->kinds[id];
+    if (ast_kind == AST_QUALIFIED_TYPE) {
+        const AstQualified *qualified = ast_qualified(checker->ast, id);
+        if (!qualified || qualified->kind != BIND_STRUCT) {
+            return fail(checker, id, "unknown qualified type");
+        }
+        return (SemaType){.kind = TYPE_STRUCT, .record = qualified->index,
+                          .record_size = checker->struct_sizes[qualified->index]};
+    }
     if (ast_kind == AST_POINTER_TYPE) {
         SemaType pointee = resolve_type(checker, checker->ast->data[id].a);
         return pointer_to(checker, id, pointee);
@@ -316,11 +326,16 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         return collection;
     }
     AstSpan name = node_span(checker->ast, id);
+    const AstBinding *import = ast_imported(checker->ast, checker->module, name);
+    if (import && import->kind == BIND_STRUCT) {
+        return (SemaType){.kind = TYPE_STRUCT, .record = import->index,
+                          .record_size = checker->struct_sizes[import->index]};
+    }
     TypeKind kind = scalar_type(checker->ast, name);
     if (kind != TYPE_INVALID) {
         return (SemaType){.kind = kind};
     }
-    uint32_t record = find_struct(checker->ast, name);
+    uint32_t record = find_struct(checker->ast, checker->module, name);
     if (record != UINT32_MAX) {
         return (SemaType){.kind = TYPE_STRUCT, .record = record,
                           .record_size = checker->struct_sizes[record]};
@@ -330,7 +345,7 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
 
 static uint32_t *function_entry(const Checker *checker, AstSpan name)
 {
-    size_t hash = 2166136261u;
+    size_t hash = (2166136261u ^ checker->module) * 16777619u;
     for (uint32_t i = 0; i < name.length; i++) {
         hash = (hash ^ checker->ast->source[name.offset + i]) * 16777619u;
     }
@@ -338,7 +353,8 @@ static uint32_t *function_entry(const Checker *checker, AstSpan name)
     size_t index = hash & mask;
     while (checker->function_map[index]) {
         uint32_t function = checker->function_map[index] - 1;
-        if (same_name(checker->ast, name, checker->ast->functions[function].name)) {
+        if (checker->ast->functions[function].module == checker->module &&
+            same_name(checker->ast, name, checker->ast->functions[function].name)) {
             break;
         }
         index = (index + 1) & mask;
@@ -369,6 +385,7 @@ static bool register_functions(Checker *checker)
     checker->function_capacity = capacity;
     for (uint32_t i = 0; i < ast->function_count && !failed(checker); i++) {
         AstFunction function = ast->functions[i];
+        checker->module = function.module;
         uint32_t *entry = function_entry(checker, function.name);
         if (*entry || boolean_name(ast, function.name)) {
             fail_at(checker, function.name.offset, "duplicate or reserved function name");
@@ -561,14 +578,33 @@ static SemaType check_call(Checker *checker, AstNodeId id)
     const Ast *ast = checker->ast;
     AstNodeData node = ast->data[id];
     AstNodeId callee = ast->children[node.a];
-    if (ast->kinds[callee] != AST_IDENTIFIER) {
+    AstNodeId root = callee;
+    while (ast->kinds[root] == AST_MEMBER) {
+        root = ast->data[root].a;
+    }
+    if (ast->kinds[root] != AST_IDENTIFIER) {
         return fail(checker, callee, "expected a named function");
     }
-    AstSpan name = node_span(ast, callee);
+    AstSpan name = node_span(ast, root);
     if (find_local(checker, name, 0)) {
-        return fail(checker, callee, "local variable is not callable");
+        return fail(checker, root, "local variable is not callable");
     }
-    uint32_t entry = *function_entry(checker, name);
+    uint32_t entry = 0;
+    if (root != callee) {
+        const AstQualified *qualified = ast_qualified(ast, id);
+        if (!qualified || qualified->kind != BIND_FUNCTION) {
+            return fail(checker, root, "expected an imported module");
+        }
+        entry = qualified->index + 1;
+    } else {
+        entry = *function_entry(checker, name);
+        if (!entry) {
+            const AstBinding *import = ast_imported(ast, checker->module, name);
+            if (import && import->kind == BIND_FUNCTION) {
+                entry = import->index + 1;
+            }
+        }
+    }
     if (!entry && name_is(ast, name, "len")) {
         if (node.b != 2) {
             return fail(checker, id, "len expects one array or slice argument");
@@ -931,6 +967,7 @@ static void check_function(Checker *checker, uint32_t index)
     const Ast *ast = checker->ast;
     AstFunction function = ast->functions[index];
     SemaFunction *info = &checker->sema->functions[index];
+    checker->module = function.module;
     checker->result = info->result;
     checker->local_count = 0;
     checker->scope_start = 0;

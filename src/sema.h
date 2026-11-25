@@ -46,6 +46,7 @@ typedef struct {
     const char *message;
 } SemaError;
 
+// Resolve project imports with modules_load before checking a multi-file AST.
 bool sema_check(const Ast *ast, Sema *out, SemaError *error);
 void sema_destroy(Sema *sema);
 const char *sema_type_name(TypeKind type);

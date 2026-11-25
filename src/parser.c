@@ -8,7 +8,9 @@ typedef struct {
     Lexer lexer;
     Token current;
     ParseError error;
-    AstBuilder builder;
+    AstBuilder *builder;
+    uint32_t source_base;
+    uint32_t module;
     unsigned group_depth;
     unsigned recursion_depth;
 } Parser;
@@ -149,7 +151,8 @@ static AstNodeId add_node(Parser *parser, AstKind kind, Token token, uint32_t a,
     if (failed(parser)) {
         return AST_NODE_NONE;
     }
-    AstNodeId id = ast_add_node(&parser->builder, kind, (uint32_t)token.offset, (AstNodeData){a, b});
+    AstNodeId id = ast_add_node(parser->builder, kind, parser->source_base + (uint32_t)token.offset,
+                               (AstNodeData){a, b});
     if (id == AST_NODE_NONE) {
         fail(parser, "could not allocate AST storage");
     }
@@ -158,7 +161,7 @@ static AstNodeId add_node(Parser *parser, AstKind kind, Token token, uint32_t a,
 
 static void push_child(Parser *parser, AstNodeId child)
 {
-    if (!failed(parser) && !ast_push_child(&parser->builder, child)) {
+    if (!failed(parser) && !ast_push_child(parser->builder, child)) {
         fail(parser, "could not allocate AST storage");
     }
 }
@@ -166,7 +169,7 @@ static void push_child(Parser *parser, AstNodeId child)
 static AstNodeRange finish_children(Parser *parser, uint32_t mark)
 {
     AstNodeRange range = {0};
-    if (!failed(parser) && !ast_finish_children(&parser->builder, mark, &range)) {
+    if (!failed(parser) && !ast_finish_children(parser->builder, mark, &range)) {
         fail(parser, "could not allocate AST storage");
     }
     return range;
@@ -203,7 +206,7 @@ static void close_group(Parser *parser, TokenKind kind, const char *message)
 static AstNodeId parse_call(Parser *parser, AstNodeId callee)
 {
     Token opening = parser->current;
-    uint32_t mark = parser->builder.pending_count;
+    uint32_t mark = parser->builder->pending_count;
     push_child(parser, callee);
     open_group(parser);
     while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_PAREN &&
@@ -378,7 +381,7 @@ static AstNodeId parse_if(Parser *parser)
                                    ? parse_if(parser) : parse_block(parser);
     }
     uint32_t index = 0;
-    if (!failed(parser) && !ast_add_if_branches(&parser->builder, branches, &index)) {
+    if (!failed(parser) && !ast_add_if_branches(parser->builder, branches, &index)) {
         fail(parser, "could not allocate AST storage");
     }
     parser->recursion_depth--;
@@ -388,7 +391,17 @@ static AstNodeId parse_if(Parser *parser)
 static AstNodeId parse_type_name(Parser *parser)
 {
     Token type = expect(parser, TOKEN_IDENTIFIER, "expected a type name");
-    return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
+    if (!match(parser, TOKEN_DOT)) {
+        return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
+    }
+    uint32_t mark = parser->builder->pending_count;
+    push_child(parser, add_node(parser, AST_IDENTIFIER, type, (uint32_t)type.length, 0));
+    do {
+        Token part = expect(parser, TOKEN_IDENTIFIER, "expected a type path component");
+        push_child(parser, add_node(parser, AST_IDENTIFIER, part, (uint32_t)part.length, 0));
+    } while (match(parser, TOKEN_DOT));
+    AstNodeRange path = finish_children(parser, mark);
+    return add_node(parser, AST_QUALIFIED_TYPE, type, path.first, path.count);
 }
 
 static AstNodeId parse_type_inner(Parser *parser)
@@ -433,7 +446,7 @@ static AstNodeId parse_variable(Parser *parser)
     }
 
     uint32_t index = 0;
-    if (!failed(parser) && !ast_add_variable(&parser->builder, variable, &index)) {
+    if (!failed(parser) && !ast_add_variable(parser->builder, variable, &index)) {
         fail(parser, "could not allocate AST storage");
     }
     return add_node(parser, AST_VAR, name, index, 0);
@@ -475,7 +488,7 @@ static AstNodeId parse_for(Parser *parser)
     AstNodeId body = parse_block(parser);
 
     uint32_t index = 0;
-    if (!failed(parser) && !ast_add_for_header(&parser->builder, header, &index)) {
+    if (!failed(parser) && !ast_add_for_header(parser->builder, header, &index)) {
         fail(parser, "could not allocate AST storage");
     }
     return add_node(parser, AST_FOR_C_STYLE, keyword, index, body);
@@ -511,7 +524,7 @@ static AstNodeId parse_block(Parser *parser)
         return AST_NODE_NONE;
     }
     Token opening = expect(parser, TOKEN_LEFT_BRACE, "expected '{' to start block");
-    uint32_t mark = parser->builder.pending_count;
+    uint32_t mark = parser->builder->pending_count;
     while (!failed(parser) && is_separator(parser->current.kind)) {
         advance(parser);
     }
@@ -531,7 +544,7 @@ static AstNodeId parse_block(Parser *parser)
 
 static AstNodeRange parse_parameters(Parser *parser)
 {
-    uint32_t mark = parser->builder.pending_count;
+    uint32_t mark = parser->builder->pending_count;
     if (failed(parser)) {
         return (AstNodeRange){0};
     }
@@ -552,7 +565,12 @@ static AstNodeRange parse_parameters(Parser *parser)
     return finish_children(parser, mark);
 }
 
-static AstNodeId parse_function(Parser *parser)
+static AstSpan source_span(const Parser *parser, Token token)
+{
+    return (AstSpan){parser->source_base + (uint32_t)token.offset, (uint32_t)token.length};
+}
+
+static AstNodeId parse_function(Parser *parser, bool public)
 {
     Token start = parser->current;
     bool external = match(parser, TOKEN_EXT);
@@ -560,8 +578,10 @@ static AstNodeId parse_function(Parser *parser)
                                       : "expected a function declaration");
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a function name");
     AstFunction function = {
-        .name = {(uint32_t)name.offset, (uint32_t)name.length},
+        .name = source_span(parser, name),
         .parameters = parse_parameters(parser),
+        .module = parser->module,
+        .public = public,
     };
     if (match(parser, TOKEN_COLON)) {
         function.return_type = parse_type(parser);
@@ -573,18 +593,18 @@ static AstNodeId parse_function(Parser *parser)
     }
 
     uint32_t index = 0;
-    if (!failed(parser) && !ast_add_function(&parser->builder, function, &index)) {
+    if (!failed(parser) && !ast_add_function(parser->builder, function, &index)) {
         fail(parser, "could not allocate AST storage");
     }
     return add_node(parser, AST_FUNCTION, start, index, 0);
 }
 
-static AstNodeId parse_struct(Parser *parser)
+static AstNodeId parse_struct(Parser *parser, bool public)
 {
     Token keyword = expect(parser, TOKEN_STRUCT, "expected 'struct'");
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a struct name");
     expect(parser, TOKEN_LEFT_BRACE, "expected '{' after struct name");
-    uint32_t mark = parser->builder.pending_count;
+    uint32_t mark = parser->builder->pending_count;
     while (!failed(parser) && is_separator(parser->current.kind)) {
         advance(parser);
     }
@@ -601,14 +621,91 @@ static AstNodeId parse_struct(Parser *parser)
     }
     expect(parser, TOKEN_RIGHT_BRACE, "expected '}' to end struct");
     AstStruct record = {
-        .name = {(uint32_t)name.offset, (uint32_t)name.length},
+        .name = source_span(parser, name),
         .fields = finish_children(parser, mark),
+        .module = parser->module,
+        .public = public,
     };
     uint32_t index = 0;
-    if (!failed(parser) && !ast_add_struct(&parser->builder, record, &index)) {
+    if (!failed(parser) && !ast_add_struct(parser->builder, record, &index)) {
         fail(parser, "could not allocate AST storage");
     }
     return add_node(parser, AST_STRUCT, keyword, index, 0);
+}
+
+static AstNodeId parse_import(Parser *parser)
+{
+    Token keyword = expect(parser, TOKEN_IMPORT, "expected 'import'");
+    AstImport item = {0};
+    uint32_t mark = parser->builder->pending_count;
+    do {
+        if (parser->builder->pending_count != mark && match(parser, TOKEN_STAR)) {
+            item.kind = IMPORT_ALL;
+            break;
+        }
+        Token part = expect(parser, TOKEN_IDENTIFIER, "expected a module path component");
+        push_child(parser, add_node(parser, AST_IDENTIFIER, part, (uint32_t)part.length, 0));
+    } while (match(parser, TOKEN_DOT));
+    item.path = finish_children(parser, mark);
+
+    if (item.kind == IMPORT_MODULE && match(parser, TOKEN_AS)) {
+        item.alias = source_span(parser, expect(parser, TOKEN_IDENTIFIER, "expected an import alias"));
+    } else if (item.kind == IMPORT_MODULE && parser->current.kind == TOKEN_LEFT_BRACE) {
+        item.kind = IMPORT_SELECTED;
+        open_group(parser);
+        do {
+            Token name = expect(parser, TOKEN_IDENTIFIER, "expected an imported name");
+            AstNodeId alias = AST_NODE_NONE;
+            if (match(parser, TOKEN_AS)) {
+                Token token = expect(parser, TOKEN_IDENTIFIER, "expected an import alias");
+                alias = add_node(parser, AST_IDENTIFIER, token, (uint32_t)token.length, 0);
+            }
+            push_child(parser, add_node(parser, AST_IMPORT_ITEM, name, (uint32_t)name.length, alias));
+        } while (match(parser, TOKEN_COMMA) && parser->current.kind != TOKEN_RIGHT_BRACE);
+        close_group(parser, TOKEN_RIGHT_BRACE, "expected '}' after imported names");
+        item.items = finish_children(parser, mark);
+    }
+
+    uint32_t index = 0;
+    if (!failed(parser) && !ast_add_import(parser->builder, item, &index)) {
+        fail(parser, "could not allocate AST storage");
+    }
+    return add_node(parser, AST_IMPORT, keyword, index, 0);
+}
+
+bool parser_append(AstBuilder *builder, const unsigned char *source, uint32_t length,
+                   uint32_t source_base, uint32_t module, AstNodeRange *out, ParseError *error)
+{
+    *error = (ParseError){0};
+    Parser parser = {.lexer = lexer_init(source, length), .builder = builder,
+                     .source_base = source_base, .module = module};
+    uint32_t mark = builder->pending_count;
+    advance(&parser);
+    while (is_separator(parser.current.kind)) {
+        advance(&parser);
+    }
+    while (!failed(&parser) && parser.current.kind != TOKEN_EOF) {
+        const char *message;
+        AstNodeId declaration;
+        if (parser.current.kind == TOKEN_IMPORT) {
+            declaration = parse_import(&parser);
+            message = "expected a newline or ';' after import";
+        } else {
+            bool public = match(&parser, TOKEN_PUB);
+            if (!public) {
+                match(&parser, TOKEN_PRIV);
+            }
+            bool record = parser.current.kind == TOKEN_STRUCT;
+            declaration = record ? parse_struct(&parser, public) : parse_function(&parser, public);
+            message = record ? "expected a newline or ';' after struct"
+                             : "expected a newline or ';' after function";
+        }
+        push_child(&parser, declaration);
+        finish_item(&parser, TOKEN_EOF, message);
+    }
+    *out = finish_children(&parser, mark);
+    *error = parser.error;
+    return !failed(&parser);
 }
 
 bool parser_parse(const unsigned char *source, size_t length, Ast *out, ParseError *error)
@@ -623,28 +720,14 @@ bool parser_parse(const unsigned char *source, size_t length, Ast *out, ParseErr
         return false;
     }
 
-    Parser parser = {
-        .lexer = lexer_init(source, length),
-        .builder.ast = {.source = source, .source_length = (uint32_t)length},
-    };
-    advance(&parser);
-    while (is_separator(parser.current.kind)) {
-        advance(&parser);
-    }
-    while (!failed(&parser) && parser.current.kind != TOKEN_EOF) {
-        bool record = parser.current.kind == TOKEN_STRUCT;
-        push_child(&parser, record ? parse_struct(&parser) : parse_function(&parser));
-        finish_item(&parser, TOKEN_EOF, record ? "expected a newline or ';' after struct"
-                                              : "expected a newline or ';' after function");
-    }
-    parser.builder.ast.declarations = finish_children(&parser, 0);
-    free(parser.builder.pending);
-
-    if (failed(&parser)) {
-        *error = parser.error;
-        ast_destroy(&parser.builder.ast);
+    AstBuilder builder = {.ast = {.source = source, .source_length = (uint32_t)length}};
+    bool parsed = parser_append(&builder, source, (uint32_t)length, 0, 0,
+                                &builder.ast.declarations, error);
+    free(builder.pending);
+    if (!parsed) {
+        ast_destroy(&builder.ast);
         return false;
     }
-    *out = parser.builder.ast;
+    *out = builder.ast;
     return true;
 }

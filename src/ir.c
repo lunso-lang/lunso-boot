@@ -473,6 +473,7 @@ static void lower_function(Lowering *lowering, uint32_t index)
         .parameter_count = function.parameters.count,
         .first_instruction = module->instruction_count,
         .slot_count = checked.slot_count,
+        .module = function.module,
         .external = function.body == AST_NODE_NONE,
     };
     for (uint32_t i = 0; i < function.parameters.count; i++) {
@@ -496,7 +497,8 @@ static void lower_function(Lowering *lowering, uint32_t index)
 
 bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
 {
-    *out = (IrModule){.source = ast->source, .function_count = ast->function_count};
+    *out = (IrModule){.source = ast->source, .function_count = ast->function_count,
+                      .module_count = ast->module_count};
     if (ast->struct_count) {
         out->struct_names = calloc(ast->struct_count, sizeof(*out->struct_names));
         if (!out->struct_names) {
@@ -504,7 +506,7 @@ bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
             return false;
         }
         for (uint32_t i = 0; i < ast->struct_count; i++) {
-            out->struct_names[i] = ast->structs[i].name;
+            out->struct_names[i] = (IrStructName){ast->structs[i].name, ast->structs[i].module};
         }
     }
     if (sema->pointee_count) {

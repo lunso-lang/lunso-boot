@@ -113,6 +113,23 @@ bool ast_add_struct(AstBuilder *builder, AstStruct record, uint32_t *index)
     return true;
 }
 
+bool ast_add_import(AstBuilder *builder, AstImport item, uint32_t *index)
+{
+    Ast *ast = &builder->ast;
+    if (ast->import_count == UINT32_MAX) {
+        return false;
+    }
+    AstImport *items = reserve(ast->imports, &builder->import_capacity,
+                               ast->import_count + 1, sizeof(*items));
+    if (!items) {
+        return false;
+    }
+    ast->imports = items;
+    *index = ast->import_count++;
+    ast->imports[*index] = item;
+    return true;
+}
+
 bool ast_add_if_branches(AstBuilder *builder, AstIfBranches branches, uint32_t *index)
 {
     Ast *ast = &builder->ast;
@@ -210,8 +227,53 @@ void ast_destroy(Ast *ast)
     free(ast->children);
     free(ast->functions);
     free(ast->structs);
+    free(ast->imports);
     free(ast->if_branches);
     free(ast->for_headers);
     free(ast->variables);
+    for (uint32_t module = 0; module < ast->module_count; module++) {
+        AstModuleScope scope = ast->modules[module];
+        for (uint32_t i = 0; i < scope.count; i++) {
+            free(scope.bindings[i].name);
+        }
+        free(scope.bindings);
+    }
+    free(ast->modules);
+    free(ast->qualified);
     *ast = (Ast){0};
+}
+
+const AstBinding *ast_imported(const Ast *ast, uint32_t module, AstSpan name)
+{
+    if (module >= ast->module_count) {
+        return NULL;
+    }
+    AstModuleScope scope = ast->modules[module];
+    for (uint32_t i = 0; i < scope.count; i++) {
+        const AstBinding *binding = &scope.bindings[i];
+        if (strlen(binding->name) == name.length &&
+            memcmp(ast->source + name.offset, binding->name, name.length) == 0) {
+            return binding;
+        }
+    }
+    return NULL;
+}
+
+const AstQualified *ast_qualified(const Ast *ast, AstNodeId node)
+{
+    uint32_t first = 0;
+    uint32_t end = ast->qualified_count;
+    while (first < end) {
+        uint32_t mid = first + (end - first) / 2;
+        const AstQualified *item = &ast->qualified[mid];
+        if (item->node == node) {
+            return item;
+        }
+        if (item->node < node) {
+            first = mid + 1;
+        } else {
+            end = mid;
+        }
+    }
+    return NULL;
 }

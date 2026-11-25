@@ -4,6 +4,7 @@
 #include "ir.h"
 #include "qbe.h"
 #include "native.h"
+#include "modules.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -12,25 +13,6 @@
 #include <string.h>
 
 typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR, MODE_EMIT_QBE, MODE_BUILD } Mode;
-
-static unsigned char *read_source(FILE *file, size_t *length)
-{
-    if (fseek(file, 0, SEEK_END) != 0) {
-        return NULL;
-    }
-    long size = ftell(file);
-    if (size < 0 || (uintmax_t)size > SIZE_MAX || fseek(file, 0, SEEK_SET) != 0) {
-        return NULL;
-    }
-
-    *length = (size_t)size;
-    unsigned char *source = malloc(*length ? *length : 1);
-    if (source && fread(source, 1, *length, file) != *length) {
-        free(source);
-        return NULL;
-    }
-    return source;
-}
 
 static void print_lexeme(const unsigned char *bytes, size_t length)
 {
@@ -78,6 +60,9 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         [TOKEN_EXT] = "EXT",
         [TOKEN_STRUCT] = "STRUCT",
         [TOKEN_AS] = "AS",
+        [TOKEN_IMPORT] = "IMPORT",
+        [TOKEN_PUB] = "PUB",
+        [TOKEN_PRIV] = "PRIV",
         [TOKEN_RETURN] = "RETURN",
         [TOKEN_IF] = "IF",
         [TOKEN_ELSE] = "ELSE",
@@ -163,68 +148,62 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
     }
 }
 
-static int report_offset_error(const char *path, const unsigned char *source, SemaError error)
-{
-    Token token = {.line = 1, .column = 1};
-    for (uint32_t i = 0; i < error.offset; i++) {
-        if (source[i] == '\r' || source[i] == '\n') {
-            if (source[i] == '\r' && i + 1 < error.offset && source[i + 1] == '\n') {
-                i++;
-            }
-            token.line++;
-            token.column = 1;
-        } else {
-            token.column++;
-        }
-    }
-    return report_source_error(path, source, token, error.message);
-}
-
-static int process_source(Mode mode, const char *path, const unsigned char *source, size_t length,
-                          const char *output)
+static int parse_source(const char *path, const unsigned char *source, size_t length)
 {
     Ast ast;
     ParseError error;
     if (!parser_parse(source, length, &ast, &error)) {
         return report_source_error(path, source, error.token, error.message);
     }
-
-    int result = EXIT_SUCCESS;
-    if (mode != MODE_PARSE) {
-        Sema sema;
-        SemaError semantic_error;
-        if (!sema_check(&ast, &sema, &semantic_error)) {
-            ast_destroy(&ast);
-            return report_offset_error(path, source, semantic_error);
-        }
-        if (mode != MODE_CHECK) {
-            IrModule ir;
-            if (!ir_lower(&ast, &sema, &ir)) {
-                fprintf(stderr, "%s: could not allocate IR storage\n", path);
-                result = EXIT_FAILURE;
-            } else {
-                bool written;
-                if (mode == MODE_BUILD) {
-                    written = native_build(&ir, path, output);
-                } else {
-                    written = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
-                }
-                if (!written) {
-                    result = EXIT_FAILURE;
-                }
-                ir_destroy(&ir);
-            }
-        } else {
-            printf("Checked %" PRIu32 " function(s)\n", ast.function_count);
-        }
-        sema_destroy(&sema);
-    } else {
-        uint32_t nodes = ast.node_count ? ast.node_count - 1 : 0;
-        printf("Parsed %" PRIu32 " function(s), %" PRIu32 " AST node(s)\n",
-               ast.function_count, nodes);
-    }
+    uint32_t nodes = ast.node_count ? ast.node_count - 1 : 0;
+    printf("Parsed %" PRIu32 " function(s), %" PRIu32 " AST node(s)\n",
+           ast.function_count, nodes);
     ast_destroy(&ast);
-    return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : result;
+    return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+static int process_source(Mode mode, const char *path, const unsigned char *source, size_t length,
+                          const char *output)
+{
+    if (mode == MODE_PARSE) {
+        return parse_source(path, source, length);
+    }
+
+    ModuleProgram program;
+    if (!modules_load(path, source, length, &program)) {
+        return EXIT_FAILURE;
+    }
+    Sema sema;
+    SemaError error;
+    if (!sema_check(&program.ast, &sema, &error)) {
+        modules_report(&program, error.offset, error.message);
+        modules_destroy(&program);
+        return EXIT_FAILURE;
+    }
+
+    bool ok = true;
+    if (mode == MODE_CHECK) {
+        printf("Checked %" PRIu32 " function(s)\n", program.ast.function_count);
+    } else if (mode == MODE_BUILD && modules_output_overlaps(&program, output)) {
+        fprintf(stderr, "%s: output would overwrite the source file\n", output);
+        ok = false;
+    } else {
+        IrModule ir;
+        if (!ir_lower(&program.ast, &sema, &ir)) {
+            fprintf(stderr, "%s: could not allocate IR storage\n", path);
+            ok = false;
+        } else {
+            if (mode == MODE_BUILD) {
+                ok = native_build(&ir, path, output);
+            } else {
+                ok = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
+            }
+            ir_destroy(&ir);
+        }
+    }
+    sema_destroy(&sema);
+    modules_destroy(&program);
+    return ok && fflush(stdout) != EOF && !ferror(stdout) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
 int main(int argc, char **argv)

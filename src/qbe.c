@@ -34,9 +34,20 @@ static bool is_unsigned(TypeKind type)
     return type >= TYPE_U8 && type <= TYPE_U64;
 }
 
-static void write_symbol(FILE *out, const IrModule *module, AstSpan name)
+static bool entry_symbol(const IrModule *module, IrFunction function)
 {
+    return !function.external && !function.module && function.name.length == 4 &&
+           memcmp(module->source + function.name.offset, "main", 4) == 0;
+}
+
+static void write_symbol(FILE *out, const IrModule *module, uint32_t index)
+{
+    IrFunction function = module->functions[index];
+    AstSpan name = function.name;
     fputc('$', out);
+    if (module->module_count > 1 && !function.external && !entry_symbol(module, function)) {
+        fprintf(out, ".lunso.fn.%" PRIu32 ".", index);
+    }
     fwrite(module->source + name.offset, 1, name.length, out);
 }
 
@@ -106,7 +117,7 @@ static void write_call(FILE *out, const IrModule *module, IrInstruction inst)
                 result.abi);
     }
     fputs("call ", out);
-    write_symbol(out, module, callee.name);
+    write_symbol(out, module, inst.a);
     fputc('(', out);
     for (uint32_t i = 0; i < inst.c; i++) {
         if (i != 0) {
@@ -421,18 +432,18 @@ static bool collect_addressed_slots(const IrModule *module, IrFunction fn, TypeK
     return true;
 }
 
-static bool write_function(FILE *out, const IrModule *module, IrFunction fn)
+static bool write_function(FILE *out, const IrModule *module, uint32_t index)
 {
+    IrFunction fn = module->functions[index];
     TypeKind *addressed;
     if (!collect_addressed_slots(module, fn, &addressed)) {
         return false;
     }
-    bool is_main = fn.name.length == 4 && !memcmp(module->source + fn.name.offset, "main", 4);
-    fputs(is_main ? "export function " : "function ", out);
+    fputs(entry_symbol(module, fn) ? "export function " : "function ", out);
     if (fn.result.kind != TYPE_VOID) {
         fprintf(out, "%s ", types[fn.result.kind].abi);
     }
-    write_symbol(out, module, fn.name);
+    write_symbol(out, module, index);
     fputc('(', out);
     for (uint32_t i = 0; i < fn.parameter_count; i++) {
         if (i != 0) {
@@ -499,7 +510,7 @@ bool qbe_write(FILE *out, const IrModule *module)
     }
     for (uint32_t i = 0; i < module->function_count; i++) {
         IrFunction fn = module->functions[i];
-        if (!fn.external && !write_function(out, module, fn)) {
+        if (!fn.external && !write_function(out, module, i)) {
             return false;
         }
     }

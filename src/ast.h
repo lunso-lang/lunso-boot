@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef uint32_t AstNodeId;
 #define AST_NODE_NONE ((AstNodeId)0)
@@ -21,9 +22,12 @@ enum {
 
     AST_FUNCTION,   // a: functions index
     AST_STRUCT,     // a: structs index
+    AST_IMPORT,     // a: imports index
+    AST_IMPORT_ITEM, // a: name length, b: alias identifier or AST_NODE_NONE
     AST_FIELD,      // a: name length, b: type node
     AST_PARAMETER,  // a: name length, b: type node
     AST_TYPE_NAME,  // a: name length
+    AST_QUALIFIED_TYPE, // a: first path component in children, b: component count
     AST_ARRAY_TYPE, // a: element type, b: length literal or AST_NODE_NONE for a slice
     AST_POINTER_TYPE, // a: pointee type
 
@@ -100,12 +104,45 @@ typedef struct {
     AstNodeRange parameters;  // Range in children.
     AstNodeId return_type;    // AST_NODE_NONE for a function without a result.
     AstNodeId body;           // AST_NODE_NONE for an external function.
+    uint32_t module;
+    bool public;
 } AstFunction;
 
 typedef struct {
     AstSpan name;
     AstNodeRange fields;  // Range in children.
+    uint32_t module;
+    bool public;
 } AstStruct;
+
+typedef enum { IMPORT_MODULE, IMPORT_ALL, IMPORT_SELECTED } AstImportKind;
+
+typedef struct {
+    AstNodeRange path;
+    AstNodeRange items;
+    AstSpan alias;
+    AstImportKind kind;
+} AstImport;
+
+typedef enum { BIND_MODULE, BIND_FUNCTION, BIND_STRUCT } AstBindingKind;
+
+typedef struct {
+    char *name;
+    uint32_t index;
+    uint32_t offset;
+    AstBindingKind kind;
+} AstBinding;
+
+typedef struct {
+    AstBinding *bindings;
+    uint32_t count;
+} AstModuleScope;
+
+typedef struct {
+    AstNodeId node;
+    uint32_t index;
+    AstBindingKind kind;
+} AstQualified;
 
 typedef struct {
     AstNodeId then_branch;
@@ -144,6 +181,8 @@ typedef struct {
     uint32_t function_count;
     AstStruct *structs;
     uint32_t struct_count;
+    AstImport *imports;
+    uint32_t import_count;
     AstIfBranches *if_branches;
     uint32_t if_branch_count;
     AstForHeader *for_headers;
@@ -152,7 +191,13 @@ typedef struct {
     uint32_t variable_count;
 
     AstNodeRange declarations;  // Top-level nodes in children, in source order.
+    AstModuleScope *modules;
+    uint32_t module_count;
+    AstQualified *qualified;    // Sorted by node ID.
+    uint32_t qualified_count;
 } Ast;
 
 // Releases parser-owned AST storage. The caller retains ownership of the source buffer.
 void ast_destroy(Ast *ast);
+const AstBinding *ast_imported(const Ast *ast, uint32_t module, AstSpan name);
+const AstQualified *ast_qualified(const Ast *ast, AstNodeId node);

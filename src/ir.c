@@ -296,6 +296,11 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
     AstKind kind = ast->kinds[id];
     switch (kind) {
     case AST_IDENTIFIER:
+        if (info.is_const) {
+            uint64_t bits = lowering->sema->const_values[info.binding];
+            return emit_value(lowering, info.type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
+                              info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+        }
         return emit_value(lowering, info.is_boolean_literal ? IR_BOOL : IR_LOAD,
                           info.type, info.binding, 0, 0);
     case AST_INTEGER:
@@ -359,9 +364,11 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
     case AST_INDEX:
     case AST_MEMBER:
     case AST_DEREFERENCE: {
-        if (info.is_enum_case) {
-            uint64_t bits = lowering->sema->enum_values[info.binding];
-            return emit_value(lowering, IR_IMMEDIATE, info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+        if (info.is_enum_case || info.is_const) {
+            uint64_t bits = info.is_const ? lowering->sema->const_values[info.binding]
+                                          : lowering->sema->enum_values[info.binding];
+            return emit_value(lowering, info.type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
+                              info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
         }
         uint32_t address = lower_memory_address(lowering, id);
         return uses_storage(info.type) ? address

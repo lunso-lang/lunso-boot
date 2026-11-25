@@ -20,6 +20,8 @@ typedef struct {
     uint32_t *struct_sizes;
     uint32_t *struct_alignments;
     uint8_t *struct_state;
+    SemaType *const_types;
+    uint8_t *const_state;
     uint32_t pointee_capacity;
     Local *locals;
     size_t local_count;
@@ -299,12 +301,43 @@ static uint64_t align_bytes(uint64_t size, uint32_t alignment)
 
 enum { STRUCT_UNVISITED = 0, STRUCT_VISITING = 1, STRUCT_DONE = 2 };
 
+static uint32_t find_const(const Ast *ast, uint32_t module, AstSpan name)
+{
+    for (uint32_t i = 0; i < ast->const_count; i++) {
+        if (ast->consts[i].module == module && same_name(ast, ast->consts[i].name, name)) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
 static bool resolve_array_length(Checker *checker, AstNodeId count_node,
                                  uint32_t elem_size, uint32_t *out_length)
 {
+    uint32_t limit = elem_size ? (INT32_MAX - 7u) / elem_size : INT32_MAX - 7u;
+    if (checker->ast->kinds[count_node] == AST_IDENTIFIER) {
+        AstSpan name = node_span(checker->ast, count_node);
+        const AstBinding *binding = ast_imported(checker->ast, checker->module, name);
+        uint32_t idx = binding && binding->kind == BIND_CONST
+                       ? binding->index
+                       : find_const(checker->ast, checker->module, name);
+        if (idx != UINT32_MAX && checker->const_state[idx] == 2 &&
+            is_integer(checker->const_types[idx].kind) && !is_enum(checker->const_types[idx])) {
+            uint64_t val = checker->sema->const_values[idx];
+            if (is_signed(checker->const_types[idx].kind) && (int64_t)val < 0) {
+                fail(checker, count_node, "array length cannot be negative");
+                return false;
+            }
+            if (val > limit) {
+                fail(checker, count_node, "array is too large for local storage");
+                return false;
+            }
+            *out_length = (uint32_t)val;
+            return true;
+        }
+    }
     AstSpan count = node_span(checker->ast, count_node);
     uint64_t value = 0;
-    uint32_t limit = elem_size ? (INT32_MAX - 7u) / elem_size : INT32_MAX - 7u;
     if (!literal_integer_value(checker->ast->source + count.offset, count.length, &value) ||
         value > limit) {
         fail(checker, count_node, "array is too large for local storage");
@@ -868,11 +901,20 @@ static SemaType check_identifier(Checker *checker, AstNodeId id)
         return bool_type;
     }
     const Local *local = find_local(checker, name, 0);
-    if (!local) {
-        return fail(checker, id, "unknown variable");
+    if (local) {
+        checker->sema->nodes[id].binding = local->slot;
+        return local->type;
     }
-    checker->sema->nodes[id].binding = local->slot;
-    return local->type;
+    const AstBinding *binding = ast_imported(checker->ast, checker->module, name);
+    uint32_t const_index = binding && binding->kind == BIND_CONST
+                           ? binding->index
+                           : find_const(checker->ast, checker->module, name);
+    if (const_index != UINT32_MAX) {
+        checker->sema->nodes[id].is_const = true;
+        checker->sema->nodes[id].binding = const_index;
+        return checker->const_types[const_index];
+    }
+    return fail(checker, id, "unknown variable");
 }
 
 static SemaType check_collection_builtin(Checker *checker, AstNodeId id, SemaBuiltin builtin)
@@ -1045,7 +1087,7 @@ typedef enum { NO_ADDRESS, READ_ONLY_ADDRESS, WRITABLE_ADDRESS } AddressAccess;
 static AddressAccess address_access(const Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
-    if (checker->sema->nodes[id].is_enum_case) {
+    if (checker->sema->nodes[id].is_enum_case || checker->sema->nodes[id].is_const) {
         return NO_ADDRESS;
     }
     while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
@@ -1194,6 +1236,14 @@ static SemaType check_member(Checker *checker, AstNodeId id)
     AstNodeData node = ast->data[id];
     AstSpan name = {ast->positions[id], node.b};
     const AstQualified *qualified = ast_qualified(ast, id);
+    if (qualified && qualified->kind == BIND_CONST) {
+        if (qualified->inaccessible) {
+            return fail(checker, id, "cannot access a private constant");
+        }
+        checker->sema->nodes[id].is_const = true;
+        checker->sema->nodes[id].binding = qualified->index;
+        return checker->const_types[qualified->index];
+    }
     AstNodeId root = node.a;
     if (qualified && qualified->kind == BIND_ENUM) {
         while (ast->kinds[root] == AST_MEMBER) {
@@ -1626,7 +1676,423 @@ void sema_destroy(Sema *sema)
     free(sema->functions);
     free(sema->pointees);
     free(sema->enum_values);
+    free(sema->const_values);
     *sema = (Sema){0};
+}
+
+static void check_const(Checker *checker, uint32_t index);
+
+static uint64_t normalize_int_bits(TypeKind kind, uint64_t bits)
+{
+    uint32_t width = 8 * sema_scalar_size(kind);
+    if (!width) {
+        return bits;
+    }
+    uint64_t mask = UINT64_MAX >> (64 - width);
+    bits &= mask;
+    if (is_signed(kind) && width < 64 && (bits & (UINT64_C(1) << (width - 1)))) {
+        bits |= ~mask;
+    }
+    return bits;
+}
+
+static double read_float_bits(TypeKind kind, uint64_t bits)
+{
+    if (kind == TYPE_F32) {
+        uint32_t raw = (uint32_t)bits;
+        float f;
+        memcpy(&f, &raw, sizeof(f));
+        return (double)f;
+    }
+    double d;
+    memcpy(&d, &bits, sizeof(d));
+    return d;
+}
+
+static uint64_t write_float_bits(TypeKind kind, double value)
+{
+    if (kind == TYPE_F32) {
+        float f = (float)value;
+        uint32_t raw = 0;
+        memcpy(&raw, &f, sizeof(raw));
+        return raw;
+    }
+    uint64_t raw = 0;
+    memcpy(&raw, &value, sizeof(raw));
+    return raw;
+}
+
+static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected, uint64_t *out_bits)
+{
+    if (!enter(checker, id)) {
+        return no_type;
+    }
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    SemaType type = no_type;
+    uint64_t bits = 0;
+
+    switch (ast->kinds[id]) {
+    case AST_INTEGER: {
+        type = integer_literal(checker, id, expected, false);
+        if (!failed(checker)) {
+            integer_magnitude(ast, id, &bits);
+            bits = normalize_int_bits(type.kind, bits);
+        }
+        break;
+    }
+    case AST_FLOAT: {
+        type = float_literal(checker, id, expected);
+        if (!failed(checker)) {
+            AstSpan span = node_span(ast, id);
+            char *buf = malloc(span.length + 1);
+            if (!buf) {
+                fail(checker, id, "could not allocate float buffer");
+                break;
+            }
+            memcpy(buf, ast->source + span.offset, span.length);
+            buf[span.length] = '\0';
+            double d = strtod(buf, NULL);
+            free(buf);
+            bits = write_float_bits(type.kind, d);
+        }
+        break;
+    }
+    case AST_IDENTIFIER: {
+        AstSpan name = node_span(ast, id);
+        if (boolean_name(ast, name)) {
+            type = bool_type;
+            bits = name_is(ast, name, "true");
+            break;
+        }
+        const AstBinding *binding = ast_imported(ast, checker->module, name);
+        uint32_t idx = binding && binding->kind == BIND_CONST
+                       ? binding->index : find_const(ast, checker->module, name);
+        if (idx == UINT32_MAX) {
+            fail(checker, id, "constant expression required");
+            break;
+        }
+        check_const(checker, idx);
+        if (!failed(checker)) {
+            type = checker->const_types[idx];
+            bits = checker->sema->const_values[idx];
+        }
+        break;
+    }
+    case AST_MEMBER: {
+        const AstQualified *qualified = ast_qualified(ast, id);
+        if (qualified && qualified->kind == BIND_CONST) {
+            if (qualified->inaccessible) {
+                fail(checker, id, "cannot access a private constant");
+                break;
+            }
+            check_const(checker, qualified->index);
+            if (!failed(checker)) {
+                type = checker->const_types[qualified->index];
+                bits = checker->sema->const_values[qualified->index];
+            }
+            break;
+        }
+        type = check_member(checker, id);
+        if (!failed(checker) && checker->sema->nodes[id].is_enum_case) {
+            bits = checker->sema->enum_values[checker->sema->nodes[id].binding];
+        } else if (!failed(checker)) {
+            fail(checker, id, "constant expression required");
+        }
+        break;
+    }
+    case AST_POSITIVE:
+    case AST_NEGATE:
+    case AST_BIT_NOT:
+    case AST_LOGICAL_NOT: {
+        AstKind op = ast->kinds[id];
+        if (op == AST_NEGATE && ast->kinds[node.a] == AST_INTEGER) {
+            type = integer_literal(checker, node.a, expected, true);
+            if (!failed(checker)) {
+                uint64_t mag = 0;
+                integer_magnitude(ast, node.a, &mag);
+                bits = normalize_int_bits(type.kind, UINT64_C(0) - mag);
+            }
+            break;
+        }
+        SemaType sub_expected = op == AST_LOGICAL_NOT ? bool_type : expected;
+        type = eval_const(checker, node.a, sub_expected, &bits);
+        if (failed(checker)) {
+            break;
+        }
+        if (op == AST_LOGICAL_NOT) {
+            if (type.kind != TYPE_BOOL) {
+                fail(checker, id, "logical '!' requires a bool operand");
+            } else {
+                bits = !bits;
+            }
+        } else if (op == AST_BIT_NOT) {
+            if (!is_plain_integer(type)) {
+                fail(checker, id, "bitwise '~' requires an integer operand");
+            } else {
+                bits = normalize_int_bits(type.kind, ~bits);
+            }
+        } else {
+            if (is_enum(type) || !is_numeric(type.kind) || (op == AST_NEGATE && !is_signed(type.kind))) {
+                fail(checker, id, op == AST_NEGATE ? "unary '-' requires a signed number"
+                                                   : "unary '+' requires a numeric operand");
+            } else if (op == AST_NEGATE) {
+                bits = is_float(type.kind)
+                       ? write_float_bits(type.kind, -read_float_bits(type.kind, bits))
+                       : normalize_int_bits(type.kind, UINT64_C(0) - bits);
+            }
+        }
+        break;
+    }
+    case AST_CAST: {
+        SemaType target = resolve_type(checker, node.b);
+        if (failed(checker)) {
+            break;
+        }
+        if (!is_integer(target.kind) && !is_float(target.kind)) {
+            fail(checker, node.b, "constant cast requires a numeric or enum type");
+            break;
+        }
+        uint64_t src_bits = 0;
+        SemaType src = eval_const(checker, node.a, no_type, &src_bits);
+        if (failed(checker)) {
+            break;
+        }
+        if (is_integer(target.kind) && is_integer(src.kind)) {
+            bits = normalize_int_bits(target.kind, src_bits);
+        } else if (is_float(target.kind) && is_float(src.kind)) {
+            bits = write_float_bits(target.kind, read_float_bits(src.kind, src_bits));
+        } else {
+            fail(checker, id, "unsupported constant cast");
+            break;
+        }
+        type = target;
+        break;
+    }
+    default: {
+        AstKind op = ast->kinds[id];
+        if (op < AST_ADD || op > AST_SHIFT_RIGHT) {
+            fail(checker, id, "constant expression required");
+            break;
+        }
+        uint64_t lbits = 0, rbits = 0;
+        SemaType ltype = no_type, rtype = no_type;
+        if (op == AST_LOGICAL_AND || op == AST_LOGICAL_OR) {
+            ltype = eval_const(checker, node.a, bool_type, &lbits);
+            if (!failed(checker)) {
+                rtype = eval_const(checker, node.b, bool_type, &rbits);
+            }
+            if (failed(checker)) {
+                break;
+            }
+            if (ltype.kind != TYPE_BOOL || rtype.kind != TYPE_BOOL) {
+                fail(checker, id, "logical operators require bool operands");
+                break;
+            }
+            type = bool_type;
+            bits = op == AST_LOGICAL_AND ? (lbits && rbits) : (lbits || rbits);
+            break;
+        }
+        ltype = eval_const(checker, node.a, expected, &lbits);
+        if (!failed(checker)) {
+            rtype = eval_const(checker, node.b, ltype, &rbits);
+        }
+        if (failed(checker)) {
+            break;
+        }
+        if (is_shift(op)) {
+            if (!is_plain_integer(ltype) || !is_plain_integer(rtype)) {
+                fail(checker, id, "shift requires integer operands");
+                break;
+            }
+            unsigned width = 8 * sema_scalar_size(ltype.kind);
+            unsigned shift = (unsigned)(rbits & (width - 1));
+            type = ltype;
+            if (op == AST_SHIFT_LEFT) {
+                bits = normalize_int_bits(type.kind, lbits << shift);
+            } else if (is_signed(type.kind)) {
+                bits = normalize_int_bits(type.kind, (uint64_t)((int64_t)lbits >> shift));
+            } else {
+                bits = normalize_int_bits(type.kind, lbits >> shift);
+            }
+            break;
+        }
+        if (op == AST_EQUAL || op == AST_NOT_EQUAL) {
+            if (ltype.kind == TYPE_BOOL && rtype.kind == TYPE_BOOL) {
+                type = bool_type;
+                bits = op == AST_EQUAL ? (lbits == rbits) : (lbits != rbits);
+                break;
+            }
+            if (is_enum(ltype) || is_enum(rtype)) {
+                if (!same_type(ltype, rtype)) {
+                    fail(checker, id, "type mismatch");
+                    break;
+                }
+                type = bool_type;
+                bits = op == AST_EQUAL ? (lbits == rbits) : (lbits != rbits);
+                break;
+            }
+        }
+        TypeKind common = common_numeric_type(ltype.kind, rtype.kind);
+        if (common == TYPE_INVALID || is_enum(ltype) || is_enum(rtype)) {
+            fail(checker, id, "invalid constant operands");
+            break;
+        }
+        if (integer_operator(op) && !is_integer(common)) {
+            fail(checker, id, "integer operator requires integer operands");
+            break;
+        }
+        if (is_float(common)) {
+            double ld = read_float_bits(ltype.kind, lbits);
+            double rd = read_float_bits(rtype.kind, rbits);
+            if (is_comparison(op)) {
+                type = bool_type;
+                switch (op) {
+                case AST_EQUAL: bits = ld == rd; break;
+                case AST_NOT_EQUAL: bits = ld != rd; break;
+                case AST_LESS: bits = ld < rd; break;
+                case AST_LESS_EQUAL: bits = ld <= rd; break;
+                case AST_GREATER: bits = ld > rd; break;
+                case AST_GREATER_EQUAL: bits = ld >= rd; break;
+                default: break;
+                }
+            } else {
+                type = (SemaType){.kind = common};
+                double res = 0.0;
+                switch (op) {
+                case AST_ADD: res = ld + rd; break;
+                case AST_SUBTRACT: res = ld - rd; break;
+                case AST_MULTIPLY: res = ld * rd; break;
+                case AST_DIVIDE: res = ld / rd; break;
+                default: break;
+                }
+                bits = write_float_bits(common, res);
+            }
+            break;
+        }
+        uint64_t lu = normalize_int_bits(common, lbits);
+        uint64_t ru = normalize_int_bits(common, rbits);
+        if (is_comparison(op)) {
+            type = bool_type;
+            if (is_signed(common)) {
+                int64_t ls = (int64_t)lu, rs = (int64_t)ru;
+                switch (op) {
+                case AST_EQUAL: bits = ls == rs; break;
+                case AST_NOT_EQUAL: bits = ls != rs; break;
+                case AST_LESS: bits = ls < rs; break;
+                case AST_LESS_EQUAL: bits = ls <= rs; break;
+                case AST_GREATER: bits = ls > rs; break;
+                case AST_GREATER_EQUAL: bits = ls >= rs; break;
+                default: break;
+                }
+            } else {
+                switch (op) {
+                case AST_EQUAL: bits = lu == ru; break;
+                case AST_NOT_EQUAL: bits = lu != ru; break;
+                case AST_LESS: bits = lu < ru; break;
+                case AST_LESS_EQUAL: bits = lu <= ru; break;
+                case AST_GREATER: bits = lu > ru; break;
+                case AST_GREATER_EQUAL: bits = lu >= ru; break;
+                default: break;
+                }
+            }
+        } else {
+            type = (SemaType){.kind = common};
+            if ((op == AST_DIVIDE || op == AST_REMAINDER) && ru == 0) {
+                fail(checker, id, "division by zero in constant expression");
+                break;
+            }
+            if (op == AST_DIVIDE && is_signed(common)) {
+                bits = (uint64_t)((int64_t)lu / (int64_t)ru);
+            } else if (op == AST_REMAINDER && is_signed(common)) {
+                bits = (uint64_t)((int64_t)lu % (int64_t)ru);
+            } else {
+                switch (op) {
+                case AST_ADD: bits = lu + ru; break;
+                case AST_SUBTRACT: bits = lu - ru; break;
+                case AST_MULTIPLY: bits = lu * ru; break;
+                case AST_DIVIDE: bits = lu / ru; break;
+                case AST_REMAINDER: bits = lu % ru; break;
+                case AST_BIT_AND: bits = lu & ru; break;
+                case AST_BIT_OR: bits = lu | ru; break;
+                case AST_BIT_XOR: bits = lu ^ ru; break;
+                default: break;
+                }
+            }
+            bits = normalize_int_bits(common, bits);
+        }
+        break;
+    }
+    }
+
+    checker->depth--;
+    *out_bits = bits;
+    return type;
+}
+
+static void check_const(Checker *checker, uint32_t index)
+{
+    if (checker->const_state[index] == STRUCT_DONE) {
+        return;
+    }
+    const Ast *ast = checker->ast;
+    AstConst constant = ast->consts[index];
+    if (checker->const_state[index] == STRUCT_VISITING) {
+        fail_at(checker, constant.name.offset, "cyclic constant definition");
+        return;
+    }
+    checker->const_state[index] = STRUCT_VISITING;
+
+    uint32_t saved_module = checker->module;
+    checker->module = constant.module;
+    if (scalar_type(ast, constant.name) != TYPE_INVALID ||
+        boolean_name(ast, constant.name) ||
+        ast_imported(ast, constant.module, constant.name) ||
+        find_const(ast, constant.module, constant.name) != index) {
+        fail_at(checker, constant.name.offset, "duplicate or reserved constant name");
+        checker->module = saved_module;
+        return;
+    }
+
+    SemaType expected = no_type;
+    if (constant.type != AST_NODE_NONE) {
+        expected = resolve_type(checker, constant.type);
+        if (failed(checker)) {
+            checker->module = saved_module;
+            return;
+        }
+        if (expected.kind != TYPE_BOOL && !is_numeric(expected.kind)) {
+            fail(checker, constant.type, "constant must have a scalar or enum type");
+            checker->module = saved_module;
+            return;
+        }
+    }
+
+    uint64_t bits = 0;
+    SemaType actual = eval_const(checker, constant.value, expected, &bits);
+    if (failed(checker)) {
+        checker->module = saved_module;
+        return;
+    }
+    if (expected.kind != TYPE_INVALID && !same_type(actual, expected)) {
+        if (!is_enum(actual) && !is_enum(expected) && can_promote(actual.kind, expected.kind)) {
+            if (is_float(expected.kind)) {
+                bits = write_float_bits(expected.kind, read_float_bits(actual.kind, bits));
+            } else {
+                bits = normalize_int_bits(expected.kind, bits);
+            }
+            actual = expected;
+        } else {
+            fail(checker, constant.value, "type mismatch");
+            checker->module = saved_module;
+            return;
+        }
+    }
+
+    checker->const_types[index] = actual;
+    checker->sema->const_values[index] = bits;
+    checker->const_state[index] = STRUCT_DONE;
+    checker->module = saved_module;
 }
 
 bool sema_check(const Ast *ast, Sema *out, SemaError *error)
@@ -1653,14 +2119,23 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     if (enum_value_count) {
         out->enum_values = calloc(enum_value_count, sizeof(*out->enum_values));
     }
+    if (ast->const_count) {
+        out->const_values = calloc(ast->const_count, sizeof(*out->const_values));
+        checker.const_types = calloc(ast->const_count, sizeof(*checker.const_types));
+        checker.const_state = calloc(ast->const_count, sizeof(*checker.const_state));
+    }
     if (!out->nodes || (ast->function_count && !out->functions) ||
         (ast->struct_count && (!checker.struct_sizes || !checker.struct_alignments || !checker.struct_state)) ||
-        (enum_value_count && !out->enum_values)) {
+        (enum_value_count && !out->enum_values) ||
+        (ast->const_count && (!out->const_values || !checker.const_types || !checker.const_state))) {
         fail_at(&checker, 0, "could not allocate semantic analysis storage");
     }
     uint32_t next_value = 0;
     for (uint32_t i = 0; i < ast->enum_count && !failed(&checker); i++) {
         check_enum(&checker, i, &next_value);
+    }
+    for (uint32_t i = 0; i < ast->const_count && !failed(&checker); i++) {
+        check_const(&checker, i);
     }
     for (uint32_t i = 0; i < ast->struct_count && !failed(&checker); i++) {
         layout_struct(&checker, i);
@@ -1679,6 +2154,8 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     free(checker.struct_sizes);
     free(checker.struct_alignments);
     free(checker.struct_state);
+    free(checker.const_types);
+    free(checker.const_state);
     if (failed(&checker)) {
         *error = checker.error;
         sema_destroy(out);

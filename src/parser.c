@@ -486,8 +486,14 @@ static AstNodeId parse_type_inner(Parser *parser)
     open_group(parser);
     AstNodeId count = AST_NODE_NONE;
     if (parser->current.kind != TOKEN_RIGHT_BRACKET) {
-        Token literal = expect(parser, TOKEN_INTEGER, "expected an integer array length or ']'");
-        count = add_node(parser, AST_INTEGER, literal, (uint32_t)literal.length, 0);
+        Token length_tok = parser->current;
+        if (length_tok.kind == TOKEN_IDENTIFIER) {
+            advance(parser);
+            count = add_node(parser, AST_IDENTIFIER, length_tok, (uint32_t)length_tok.length, 0);
+        } else {
+            length_tok = expect(parser, TOKEN_INTEGER, "expected an integer array length or ']'");
+            count = add_node(parser, AST_INTEGER, length_tok, (uint32_t)length_tok.length, 0);
+        }
     }
     close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after array length");
     AstNodeId element = parse_type(parser);
@@ -767,6 +773,30 @@ static AstNodeId parse_enum(Parser *parser, bool public)
     return add_node(parser, AST_ENUM, keyword, index, 0);
 }
 
+static AstNodeId parse_const(Parser *parser, bool public)
+{
+    Token keyword = expect(parser, TOKEN_CONST, "expected 'const'");
+    Token name = expect(parser, TOKEN_IDENTIFIER, "expected a constant name");
+    AstNodeId type = AST_NODE_NONE;
+    if (match(parser, TOKEN_COLON)) {
+        type = parse_type(parser);
+    }
+    expect(parser, TOKEN_EQUAL, "expected '=' in constant declaration");
+    AstNodeId value = parse_expression(parser, PREC_ASSIGNMENT);
+    AstConst constant = {
+        .name = source_span(parser, name),
+        .type = type,
+        .value = value,
+        .module = parser->module,
+        .public = public,
+    };
+    uint32_t index = 0;
+    if (!failed(parser) && !ast_add_const(parser->builder, constant, &index)) {
+        fail(parser, "could not allocate AST storage");
+    }
+    return add_node(parser, AST_CONST, keyword, index, 0);
+}
+
 static AstNodeId parse_import(Parser *parser)
 {
     Token keyword = expect(parser, TOKEN_IMPORT, "expected 'import'");
@@ -837,6 +867,10 @@ bool parser_append(AstBuilder *builder, const unsigned char *source, uint32_t le
             case TOKEN_ENUM:
                 declaration = parse_enum(&parser, public);
                 message = NULL;
+                break;
+            case TOKEN_CONST:
+                declaration = parse_const(&parser, public);
+                message = "expected a newline or ';' after constant";
                 break;
             default:
                 declaration = parse_function(&parser, public);

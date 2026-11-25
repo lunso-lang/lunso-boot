@@ -130,6 +130,23 @@ bool ast_add_enum(AstBuilder *builder, AstEnum enumeration, uint32_t *index)
     return true;
 }
 
+bool ast_add_const(AstBuilder *builder, AstConst constant, uint32_t *index)
+{
+    Ast *ast = &builder->ast;
+    if (ast->const_count == UINT32_MAX) {
+        return false;
+    }
+    AstConst *consts = reserve(ast->consts, &builder->const_capacity,
+                               ast->const_count + 1, sizeof(*consts));
+    if (!consts) {
+        return false;
+    }
+    ast->consts = consts;
+    *index = ast->const_count++;
+    consts[*index] = constant;
+    return true;
+}
+
 bool ast_add_import(AstBuilder *builder, AstImport item, uint32_t *index)
 {
     Ast *ast = &builder->ast;
@@ -245,6 +262,7 @@ void ast_destroy(Ast *ast)
     free(ast->functions);
     free(ast->structs);
     free(ast->enums);
+    free(ast->consts);
     free(ast->imports);
     free(ast->if_branches);
     free(ast->for_headers);

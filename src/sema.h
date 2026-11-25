@@ -32,6 +32,7 @@ typedef struct {
     bool borrow_array;  // The expression's fixed array is used as a full slice.
     bool falls_through;
     bool is_enum_case;
+    bool is_const;
 } SemaNode;
 
 typedef struct {
@@ -44,6 +45,7 @@ typedef struct {
     SemaFunction *functions;  // Indexed like Ast.functions.
     SemaType *pointees;
     uint64_t *enum_values;
+    uint64_t *const_values;
     uint32_t pointee_count;
 } Sema;
 

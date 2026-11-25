@@ -332,6 +332,12 @@ static bool declaration_name(const Ast *ast, AstNodeId id, AstSpan *name,
         *kind = BIND_ENUM;
         return true;
     }
+    if (ast->kinds[id] == AST_CONST) {
+        *name = ast->consts[index].name;
+        *public = ast->consts[index].public;
+        *kind = BIND_CONST;
+        return true;
+    }
     return false;
 }
 
@@ -594,7 +600,7 @@ static bool qualify(Loader *loader, uint32_t owner, AstNodeId id, const AstSpan 
                     uint32_t count, AstBindingKind expected)
 {
     const Ast *ast = &loader->builder.ast;
-    bool optional = expected == BIND_ENUM;
+    bool optional = expected == BIND_ENUM || expected == BIND_CONST;
     char *first = copy_name(ast, parts[0]);
     if (!first) {
         return out_of_memory(loader, parts[0].offset);
@@ -682,10 +688,19 @@ static bool resolve_references(Loader *loader, uint32_t owner, AstNodeId first, 
             bool call = ast->kinds[id] == AST_CALL;
             uint32_t start = member_path(ast, call ? ast->children[node.a] : id, parts);
             uint32_t count = MAX_MODULE_DEPTH - start;
-            if ((call ? count >= 2 : count >= 3) &&
-                !qualify(loader, owner, id, parts + start, call ? count : count - 1,
-                         call ? BIND_FUNCTION : BIND_ENUM)) {
-                return false;
+            if (call) {
+                if (count >= 2 && !qualify(loader, owner, id, parts + start, count, BIND_FUNCTION)) {
+                    return false;
+                }
+            } else {
+                uint32_t before = loader->builder.ast.qualified_count;
+                if (count >= 3 && !qualify(loader, owner, id, parts + start, count - 1, BIND_ENUM)) {
+                    return false;
+                }
+                if (loader->builder.ast.qualified_count == before && count >= 2 &&
+                    !qualify(loader, owner, id, parts + start, count, BIND_CONST)) {
+                    return false;
+                }
             }
         }
     }

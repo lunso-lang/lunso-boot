@@ -344,6 +344,14 @@ static void gen_valid_program(StrBuf *sb)
         sb_append(sb, "ext fun ext_f(a: i32): i32\n");
     }
 
+    if (rng_range(2) == 0) {
+        sb_append(sb, "const K");
+        if (rng_range(2) == 0) {
+            sb_append(sb, ": i32");
+        }
+        sb_append(sb, " = %zu\n", rng_range(100));
+    }
+
     sb_append(sb, "fun main(");
     if (rng_range(2) == 0) {
         sb_append(sb, "a: ");

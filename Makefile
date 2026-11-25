@@ -1,5 +1,6 @@
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic
+PYTHON ?= python3
 STD_DIR ?= $(CURDIR)/std
 shell_quote = '$(subst ','"'"',$(1))'
 SOURCES := src/main.c src/lexer.c src/ast.c src/parser.c src/sema.c src/ir.c src/ir_write.c \
@@ -7,9 +8,12 @@ SOURCES := src/main.c src/lexer.c src/ast.c src/parser.c src/sema.c src/ir.c src
 HEADERS := src/lexer.h src/ast.h src/ast_builder.h src/parser.h src/sema.h src/ir.h \
            src/literal.h src/qbe.h src/native.h src/modules.h
 
-.PHONY: all clean force
+.PHONY: all clean force test
 
 all: build/lunso
+
+test: all build/std-linux-x86_64.o
+	$(PYTHON) tests/run.py
 
 build/lunso: $(SOURCES) $(HEADERS) build/std_path.h
 	mkdir -p build

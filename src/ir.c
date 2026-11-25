@@ -330,7 +330,11 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         AstNodeData bounds = ast->data[data.b];
         uint32_t start = lower_index(lowering, bounds.a);
         uint32_t end = lower_index(lowering, bounds.b);
-        return emit_value(lowering, IR_SLICE, lowering->sema->nodes[data.a].type, base, start, end);
+        SemaType source_type = lowering->sema->nodes[data.a].type;
+        if (source_type.kind == TYPE_POINTER) {
+            return emit_value(lowering, IR_POINTER_SLICE, info.type, base, start, end);
+        }
+        return emit_value(lowering, IR_SLICE, source_type, base, start, end);
     }
     case AST_POSITIVE:
         return lower_expression(lowering, data.a);

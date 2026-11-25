@@ -192,7 +192,9 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
     case IR_POINTER_INDEX:
     case IR_MEMORY_STORE:
     case IR_SLICE:
+    case IR_POINTER_SLICE:
         fputs(instruction.op == IR_SLICE ? "slice." :
+              instruction.op == IR_POINTER_SLICE ? "pointer_slice." :
               instruction.op == IR_ELEMENT_ADDRESS ? "element_address." :
               instruction.op == IR_POINTER_INDEX ? "pointer_index." : "store_memory.", output);
         write_type(output, module, instruction.type);
@@ -200,7 +202,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         write_value(output, instruction.a);
         fputs(", ", output);
         write_value(output, instruction.b);
-        if (instruction.op == IR_SLICE) {
+        if (instruction.op == IR_SLICE || instruction.op == IR_POINTER_SLICE) {
             fputs(", ", output);
             write_value(output, instruction.c);
         }

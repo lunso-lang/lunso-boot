@@ -1060,12 +1060,18 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         AstNodeData bounds = ast->data[node.b];
         SemaType start = value(checker, bounds.a, no_type);
         SemaType end = value(checker, bounds.b, no_type);
-        if (!is_array_like(base.kind) || !is_integer(start.kind) || !is_integer(end.kind)) {
-            return fail(checker, id, "slicing requires an array or slice and integer bounds");
+        if ((!is_array_like(base.kind) && base.kind != TYPE_POINTER) ||
+            !is_integer(start.kind) || !is_integer(end.kind)) {
+            return fail(checker, id, "slicing requires an array, slice, or pointer and integer bounds");
         }
-        return (SemaType){.kind = TYPE_SLICE, .element = base.element, .record = base.record,
-                          .record_size = base.record_size, .pointee = base.pointee,
-                          .read_only = base.read_only};
+        if (failed(checker)) {
+            return no_type;
+        }
+        SemaType element = base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee]
+                                                     : element_type(base);
+        return (SemaType){.kind = TYPE_SLICE, .element = element.kind, .record = element.record,
+                          .record_size = element.record_size, .pointee = element.pointee,
+                          .read_only = element.read_only};
     }
     case AST_MEMBER:
         return check_member(checker, id);

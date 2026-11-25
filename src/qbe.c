@@ -159,12 +159,16 @@ static void write_index_address(FILE *out, IrInstruction inst, uint32_t size)
 
 static void write_access(FILE *out, IrInstruction inst)
 {
-    bool slice = inst.op == IR_SLICE;
+    bool slice = inst.op == IR_SLICE || inst.op == IR_POINTER_SLICE;
     uint32_t bound = slice ? inst.c : inst.b;
     // Unsigned comparisons also reject negative indices widened from signed types.
     fprintf(out, "\t%%in%" PRIu32 " =w %s %%v%" PRIu32 ", ",
             inst.result, slice ? "culel" : "cultl", bound);
-    write_length(out, inst.type, inst.a);
+    if (inst.op == IR_POINTER_SLICE) {
+        fprintf(out, "%" PRIu64, (uint64_t)INT64_MAX / sema_element_size(inst.type));
+    } else {
+        write_length(out, inst.type, inst.a);
+    }
     fputc('\n', out);
     if (slice) {
         fprintf(out, "\t%%order%" PRIu32 " =w culel %%v%" PRIu32 ", %%v%" PRIu32 "\n",
@@ -365,6 +369,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         break;
     case IR_ELEMENT_ADDRESS:
     case IR_SLICE:
+    case IR_POINTER_SLICE:
         write_access(out, inst);
         break;
     case IR_POINTER_INDEX:
@@ -476,7 +481,7 @@ static bool write_function(FILE *out, const IrModule *module, uint32_t index)
         uint32_t index = fn.first_instruction + i;
         write_instruction(out, module, index, addressed);
         IrOp op = module->instructions[index].op;
-        has_bounds_check |= op == IR_ELEMENT_ADDRESS || op == IR_SLICE;
+        has_bounds_check |= op == IR_ELEMENT_ADDRESS || op == IR_SLICE || op == IR_POINTER_SLICE;
         if (i == 0) {
             if (addressed) {
                 for (uint32_t slot = 0; slot < fn.slot_count; slot++) {

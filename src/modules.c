@@ -9,6 +9,10 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#ifndef LUNSO_STD_DIR
+#define LUNSO_STD_DIR ""
+#endif
+
 typedef enum { UNLOADED, LOADING, LOADED } LoadState;
 
 typedef struct {
@@ -26,6 +30,7 @@ typedef struct {
     ModuleProgram *program;
     AstBuilder builder;
     char *root;
+    char *std_root;
     Module *modules;
     uint32_t module_count;
     uint32_t module_capacity;
@@ -158,18 +163,26 @@ static uint32_t add_module(Loader *loader, Module module)
     return index;
 }
 
+static bool is_std_module(const char *name)
+{
+    return strcmp(name, "std") == 0 || strncmp(name, "std/", 4) == 0;
+}
+
 static bool get_module(Loader *loader, const char *name, uint32_t offset, uint32_t *out)
 {
     *out = NO_MODULE;
-    for (uint32_t i = 0; i < loader->module_count; i++) {
+    bool in_std = loader->std_root && is_std_module(name);
+    for (uint32_t i = in_std ? 1 : 0; i < loader->module_count; i++) {
         if (!strcmp(loader->modules[i].name, name)) {
             *out = i;
             return true;
         }
     }
-    char *directory = concat(loader->root, name, "");
-    char *file = concat(loader->root, name, ".lunso");
-    if (!directory || !file) {
+    bool std_root = in_std && name[3] == '\0';
+    char *directory = in_std ? concat(loader->std_root, "/", std_root ? "" : name + 4)
+                             : concat(loader->root, name, "");
+    char *file = directory && !std_root ? concat(directory, "", ".lunso") : NULL;
+    if (!directory || (!std_root && !file)) {
         free(directory);
         free(file);
         return out_of_memory(loader, offset);
@@ -178,7 +191,7 @@ static bool get_module(Loader *loader, const char *name, uint32_t offset, uint32
         free(directory);
         directory = NULL;
     }
-    if (!is_file(file)) {
+    if (file && !is_file(file)) {
         free(file);
         file = NULL;
     }
@@ -528,8 +541,13 @@ static bool load_import(Loader *loader, uint32_t owner, AstNodeId id)
     uint32_t target;
     bool ok = get_module(loader, name, offset, &target);
     if (ok && target == NO_MODULE) {
-        modules_report(loader->program, offset, "module not found in project");
-        fprintf(stderr, "  module %s\n", name);
+        if (loader->std_root && is_std_module(name)) {
+            modules_report(loader->program, offset, "module not found in the standard library");
+            fprintf(stderr, "  module %s in %s\n", name, loader->std_root);
+        } else {
+            modules_report(loader->program, offset, "module not found in project");
+            fprintf(stderr, "  module %s\n", name);
+        }
         ok = false;
     }
     free(name);
@@ -761,11 +779,30 @@ static bool load_entry(Loader *loader, const char *path, const unsigned char *so
            finish_module(loader, 0, 1, loader->builder.ast.node_count);
 }
 
-bool modules_load(const char *path, const unsigned char *source, size_t length, ModuleProgram *out)
+static bool select_std_root(Loader *loader, const char *override)
+{
+    const char *path = override ? override : LUNSO_STD_DIR;
+    if (!is_directory(path)) {
+        if (!override) {
+            return true;
+        }
+        fprintf(stderr, "%s: --std requires an existing directory\n", path);
+        return false;
+    }
+    loader->std_root = realpath(path, NULL);
+    if (!loader->std_root) {
+        perror(path);
+        return false;
+    }
+    return true;
+}
+
+bool modules_load(const char *path, const unsigned char *source, size_t length,
+                  const char *std_dir, ModuleProgram *out)
 {
     *out = (ModuleProgram){0};
     Loader loader = {.program = out};
-    bool ok = load_entry(&loader, path, source, length);
+    bool ok = select_std_root(&loader, std_dir) && load_entry(&loader, path, source, length);
     Ast *ast = &loader.builder.ast;
     if (ok) {
         ast->modules = calloc(loader.module_count, sizeof(*ast->modules));
@@ -800,6 +837,7 @@ bool modules_load(const char *path, const unsigned char *source, size_t length, 
     }
     free(loader.modules);
     free(loader.root);
+    free(loader.std_root);
     free(loader.builder.pending);
     return ok;
 }

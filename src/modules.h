@@ -18,7 +18,9 @@ typedef struct {
 } ModuleProgram;
 
 unsigned char *read_source(FILE *file, size_t *length);
-bool modules_load(const char *path, const unsigned char *source, size_t length, ModuleProgram *out);
+// A null std_dir selects the configured standard-library directory.
+bool modules_load(const char *path, const unsigned char *source, size_t length,
+                  const char *std_dir, ModuleProgram *out);
 void modules_destroy(ModuleProgram *program);
 void modules_report(const ModuleProgram *program, uint32_t offset, const char *message);
 bool modules_output_overlaps(const ModuleProgram *program, const char *output);

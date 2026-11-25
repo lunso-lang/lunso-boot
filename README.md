@@ -10,9 +10,19 @@ Set `QBE` or `CC` to select a different executable.
 ./build/libc-demo
 ```
 
-Module names are relative to the entry file's directory. For example,
-`import std.io` loads `std/io.lunso` and binds `io`. `import std` binds `std`,
-so its I/O module can be reached as `std.io`.
+Project module names are relative to the entry file's directory. When a standard
+library directory is available, `import std.io` loads `io.lunso` from that
+directory and binds `io`. `import std` binds the root namespace, so its I/O
+module can be reached as `std.io`.
+
+`make STD_DIR=/path/to/std` configures the default directory. The Makefile
+defaults to `std/` in this repository. When the default directory is absent,
+`std` resolves through the project directory. `--std=/path/to/std` selects an
+existing directory for a single invocation.
+
+```sh
+./build/lunso --std=/path/to/std --check main.lunso
+```
 
 ```lunso
 import std.*

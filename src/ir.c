@@ -226,7 +226,7 @@ static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
     case AST_INDEX: {
         uint32_t base = lower_expression(lowering, data.a);
         uint32_t index = lower_expression(lowering, data.b);
-        return emit_value(lowering, IR_INDEX, info.type, base, index,
+        return emit_value(lowering, IR_INDEX, lowering->sema->nodes[data.b].type, base, index,
                           lowering->sema->nodes[data.a].type.length);
     }
     case AST_POSITIVE:

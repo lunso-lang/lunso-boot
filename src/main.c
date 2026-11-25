@@ -2,6 +2,7 @@
 #include "parser.h"
 #include "sema.h"
 #include "ir.h"
+#include "qbe.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -9,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR } Mode;
+typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR, MODE_EMIT_QBE } Mode;
 
 static unsigned char *read_source(FILE *file, size_t *length)
 {
@@ -184,20 +185,21 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     }
 
     int result = EXIT_SUCCESS;
-    if (mode == MODE_CHECK || mode == MODE_EMIT_IR) {
+    if (mode == MODE_CHECK || mode == MODE_EMIT_IR || mode == MODE_EMIT_QBE) {
         Sema sema;
         SemaError semantic_error;
         if (!sema_check(&ast, &sema, &semantic_error)) {
             ast_destroy(&ast);
             return report_offset_error(path, source, semantic_error);
         }
-        if (mode == MODE_EMIT_IR) {
+        if (mode == MODE_EMIT_IR || mode == MODE_EMIT_QBE) {
             IrModule ir;
             if (!ir_lower(&ast, &sema, &ir)) {
                 fprintf(stderr, "%s: could not allocate IR storage\n", path);
                 result = EXIT_FAILURE;
             } else {
-                if (!ir_write(stdout, &ir)) {
+                bool written = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
+                if (!written) {
                     result = EXIT_FAILURE;
                 }
                 ir_destroy(&ir);
@@ -224,9 +226,12 @@ int main(int argc, char **argv)
         mode = MODE_CHECK;
     } else if (argc > 1 && strcmp(argv[1], "--emit-ir") == 0) {
         mode = MODE_EMIT_IR;
+    } else if (argc > 1 && strcmp(argv[1], "--emit-qbe") == 0) {
+        mode = MODE_EMIT_QBE;
     }
     if (argc != (mode == MODE_TOKENS ? 2 : 3)) {
-        fprintf(stderr, "usage: %s [--parse | --check | --emit-ir] <source.lunso>\n", argv[0]);
+        fprintf(stderr, "usage: %s [--parse | --check | --emit-ir | --emit-qbe] <source.lunso>\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
 

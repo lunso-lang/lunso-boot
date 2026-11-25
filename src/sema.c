@@ -1,4 +1,5 @@
 #include "sema.h"
+#include "literal.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -316,31 +317,19 @@ static SemaType float_literal(Checker *checker, AstNodeId id, SemaType expected)
     return finite ? type : fail(checker, id, "floating-point literal is out of range");
 }
 
-static bool is_hex(unsigned char byte)
-{
-    return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f') ||
-           (byte >= 'A' && byte <= 'F');
-}
-
 static SemaType string_literal(Checker *checker, AstNodeId id)
 {
     AstSpan span = node_span(checker->ast, id);
     const unsigned char *bytes = checker->ast->source + span.offset;
     uint32_t length = 0;
-    for (uint32_t i = 1; i < span.length - 1; i++, length++) {
+    for (uint32_t i = 1; i < span.length - 1; length++) {
         if (bytes[i] == 0) {
             fail_at(checker, span.offset + i, "use an escape for a zero byte in a literal");
             return no_type;
         }
-        if (bytes[i] != '\\') {
-            continue;
-        }
-        unsigned char escape = bytes[++i];
-        if (escape == 'x' && span.length - i > 3 && is_hex(bytes[i + 1]) &&
-            is_hex(bytes[i + 2])) {
-            i += 2;
-        } else if (escape == 0 || !strchr("0nrt\\\"", escape)) {
-            fail_at(checker, span.offset + i - 1, "invalid byte literal escape");
+        unsigned char byte;
+        if (!literal_next_byte(bytes, span.length - 1, &i, &byte)) {
+            fail_at(checker, span.offset + i, "invalid byte literal escape");
             return no_type;
         }
     }

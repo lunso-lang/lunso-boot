@@ -15,7 +15,8 @@ typedef enum {
 
 // Value IDs begin at 1. Value ID 0 is absent. Slots and labels start at 0.
 // Number/byte constants use a source offset and length in a and b. For a number,
-// c adds a minus sign. For an index instruction, c is the array length.
+// c adds a minus sign. An index instruction stores the index type and the array
+// length (c), and produces a u8 value.
 // A call stores a function index, the first argument index, and the argument count.
 // Comparison instructions use the operand type and produce a bool value.
 typedef struct {

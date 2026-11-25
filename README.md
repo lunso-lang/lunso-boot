@@ -28,3 +28,13 @@ or `priv` to mark its visibility explicitly.
 ./build/lunso --build examples/modules/main.lunso -o build/modules-demo
 ./build/modules-demo
 ```
+
+Pass an object file to the native linker with `--link`. Repeat the option for
+multiple inputs. This Linux x86-64 example calls a `write` syscall from an
+assembly object through `ext fun`.
+
+```sh
+cc -c examples/link/linux_x86_64.s -o build/linux_x86_64.o
+./build/lunso --build examples/link/main.lunso -o build/link-demo --link build/linux_x86_64.o
+./build/link-demo
+```

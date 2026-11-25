@@ -163,7 +163,7 @@ static int parse_source(const char *path, const unsigned char *source, size_t le
 }
 
 static int process_source(Mode mode, const char *path, const unsigned char *source, size_t length,
-                          const char *output)
+                          const NativeOptions *native)
 {
     if (mode == MODE_PARSE) {
         return parse_source(path, source, length);
@@ -184,8 +184,8 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     bool ok = true;
     if (mode == MODE_CHECK) {
         printf("Checked %" PRIu32 " function(s)\n", program.ast.function_count);
-    } else if (mode == MODE_BUILD && modules_output_overlaps(&program, output)) {
-        fprintf(stderr, "%s: output would overwrite the source file\n", output);
+    } else if (mode == MODE_BUILD && modules_output_overlaps(&program, native->output)) {
+        fprintf(stderr, "%s: output would overwrite the source file\n", native->output);
         ok = false;
     } else {
         IrModule ir;
@@ -194,7 +194,7 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
             ok = false;
         } else {
             if (mode == MODE_BUILD) {
-                ok = native_build(&ir, path, output);
+                ok = native_build(&ir, path, native);
             } else {
                 ok = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
             }
@@ -204,6 +204,53 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     sema_destroy(&sema);
     modules_destroy(&program);
     return ok && fflush(stdout) != EOF && !ferror(stdout) ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+static bool parse_native_options(int argc, char **argv, NativeOptions *native)
+{
+    if (argc < 5 || (argc - 3) % 2 != 0) {
+        return false;
+    }
+    size_t extra = (size_t)(argc - 5) / 2;
+    if (extra) {
+        native->objects = calloc(extra, sizeof(*native->objects));
+        if (!native->objects) {
+            fputs("could not allocate link options\n", stderr);
+            return false;
+        }
+    }
+    for (int i = 3; i < argc; i += 2) {
+        if (strcmp(argv[i], "-o") == 0 && !native->output) {
+            native->output = argv[i + 1];
+        } else if (strcmp(argv[i], "--link") == 0 && native->object_count < extra) {
+            native->objects[native->object_count++] = argv[i + 1];
+        } else {
+            return false;
+        }
+    }
+    return native->output != NULL;
+}
+
+static int run_source(Mode mode, const char *path, const NativeOptions *native)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        perror(path);
+        return EXIT_FAILURE;
+    }
+
+    size_t length;
+    unsigned char *source = read_source(file, &length);
+    fclose(file);
+    if (!source) {
+        fprintf(stderr, "%s: could not read source\n", path);
+        return EXIT_FAILURE;
+    }
+
+    int result = mode == MODE_TOKENS ? dump_tokens(path, source, length)
+                                     : process_source(mode, path, source, length, native);
+    free(source);
+    return result;
 }
 
 int main(int argc, char **argv)
@@ -220,32 +267,20 @@ int main(int argc, char **argv)
     } else if (argc > 1 && strcmp(argv[1], "--build") == 0) {
         mode = MODE_BUILD;
     }
-    int expected = mode == MODE_TOKENS ? 2 : (mode == MODE_BUILD ? 5 : 3);
-    if (argc != expected || (mode == MODE_BUILD && strcmp(argv[3], "-o") != 0)) {
+    NativeOptions native = {0};
+    bool valid = mode == MODE_BUILD ? parse_native_options(argc, argv, &native)
+                                    : argc == (mode == MODE_TOKENS ? 2 : 3);
+    if (!valid) {
         fprintf(stderr, "usage: %s [--parse | --check | --emit-ir | --emit-qbe] <source.lunso>\n",
                 argv[0]);
-        fprintf(stderr, "       %s --build <source.lunso> -o <executable>\n", argv[0]);
+        fprintf(stderr, "       %s --build <source.lunso> -o <executable> [--link <object>]...\n",
+                argv[0]);
+        free(native.objects);
         return EXIT_FAILURE;
     }
 
     const char *path = argv[mode == MODE_TOKENS ? 1 : 2];
-    FILE *file = fopen(path, "rb");
-    if (!file) {
-        perror(path);
-        return EXIT_FAILURE;
-    }
-
-    size_t length;
-    unsigned char *source = read_source(file, &length);
-    fclose(file);
-    if (!source) {
-        fprintf(stderr, "%s: could not read source\n", path);
-        return EXIT_FAILURE;
-    }
-
-    const char *output = mode == MODE_BUILD ? argv[4] : NULL;
-    int result = mode == MODE_TOKENS ? dump_tokens(path, source, length)
-                                     : process_source(mode, path, source, length, output);
-    free(source);
+    int result = run_source(mode, path, &native);
+    free(native.objects);
     return result;
 }

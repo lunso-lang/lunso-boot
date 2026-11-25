@@ -138,8 +138,66 @@ static void remove_temporary(char *path)
     }
 }
 
-bool native_build(const IrModule *module, const char *source, const char *output)
+static bool check_link_inputs(const NativeOptions *options)
 {
+    for (size_t i = 0; i < options->object_count; i++) {
+        const char *path = options->objects[i];
+        struct stat info;
+        if (stat(path, &info) != 0) {
+            fprintf(stderr, "%s: could not read link input: %s\n", path, strerror(errno));
+            return false;
+        }
+        if (!S_ISREG(info.st_mode)) {
+            fprintf(stderr, "%s: link input must be a regular file\n", path);
+            return false;
+        }
+        if (same_file(path, options->output)) {
+            fprintf(stderr, "%s: output would overwrite a link input\n", options->output);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool link_program(const NativeOptions *options, char *assembly, char *program)
+{
+    size_t count = options->object_count;
+    if (count > (SIZE_MAX / sizeof(char *) - 5) / 2) {
+        fputs("too many link inputs\n", stderr);
+        return false;
+    }
+    char **args = calloc(5 + count * 2, sizeof(*args));
+    if (!args) {
+        fputs("could not allocate linker arguments\n", stderr);
+        return false;
+    }
+    char *cc = getenv("CC");
+    args[0] = cc && *cc ? cc : "cc";
+    args[1] = assembly;
+    size_t i = 0;
+    for (; i < count; i++) {
+        const char *path = options->objects[i];
+        args[2 + i * 2] = "-Xlinker";
+        // Give the linker a file operand even if the relative path starts with '-' or '@'.
+        args[3 + i * 2] = path[0] == '/' ? strdup(path) : join_path("./", path);
+        if (!args[3 + i * 2]) {
+            fputs("could not allocate a link input path\n", stderr);
+            break;
+        }
+    }
+    args[2 + count * 2] = "-o";
+    args[3 + count * 2] = program;
+    bool ok = i == count && run_tool(args);
+    for (size_t j = 0; j < i; j++) {
+        free(args[3 + j * 2]);
+    }
+    free(args);
+    return ok;
+}
+
+bool native_build(const IrModule *module, const char *source, const NativeOptions *options)
+{
+    const char *output = options->output;
     if (!has_entry_point(module)) {
         fprintf(stderr, "%s: expected entry point 'fun main(): i32'\n", source);
         return false;
@@ -150,6 +208,9 @@ bool native_build(const IrModule *module, const char *source, const char *output
     }
     if (same_file(source, output)) {
         fprintf(stderr, "%s: output would overwrite the source file\n", output);
+        return false;
+    }
+    if (!check_link_inputs(options)) {
         return false;
     }
 
@@ -166,10 +227,9 @@ bool native_build(const IrModule *module, const char *source, const char *output
         fprintf(stderr, "%s: could not allocate output paths\n", output);
     } else {
         char *qbe = getenv("QBE");
-        char *cc = getenv("CC");
         char *qbe_args[] = {qbe && *qbe ? qbe : "qbe", "-o", assembly, il, NULL};
-        char *cc_args[] = {cc && *cc ? cc : "cc", assembly, "-o", program, NULL};
-        ok = write_il(module, il) && run_tool(qbe_args) && run_tool(cc_args) && publish(program, output);
+        ok = write_il(module, il) && run_tool(qbe_args) &&
+             link_program(options, assembly, program) && publish(program, output);
     }
 
     remove_temporary(il);

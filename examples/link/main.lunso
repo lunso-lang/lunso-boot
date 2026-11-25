@@ -1,0 +1,10 @@
+ext fun lunso_write(fd: i32, buffer: *u8, count: u64): i64
+
+fun main(): i32 {
+    var message: [13]u8 = "Hello, Lunso\n"
+    var count: i64 = len(message)
+    if lunso_write(1, &message[0], count as u64) != count {
+        return 1
+    }
+    return 0
+}

@@ -1,0 +1,31 @@
+import std.mem
+
+fun main(): i32 {
+    var ast: mem.Arena
+    var scratch: mem.Arena
+    if mem.init(&ast, 4096) < 0 || mem.init(&scratch, 4096) < 0 {
+        return 1
+    }
+
+    var node: *u8
+    var temp: *u8
+    if (mem.alloc(&ast, 16, 8, &node) < 0 ||
+        mem.alloc(&scratch, 16, 8, &temp) < 0) {
+        return 1
+    }
+    node[0] = 42
+    temp[0] = 99
+
+    mem.reset(&scratch)
+    if mem.alloc(&scratch, 16, 8, &temp) < 0 {
+        return 1
+    }
+    temp[0] = 7
+    var valid = node[0] == 42
+    var scratch_status = mem.deinit(&scratch)
+    var ast_status = mem.deinit(&ast)
+    if !valid || scratch_status < 0 || ast_status < 0 {
+        return 1
+    }
+    return 0
+}

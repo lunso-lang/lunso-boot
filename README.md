@@ -89,3 +89,34 @@ make build/lunso build/std-linux-x86_64.o
 
 Use `data(array_or_slice)` to borrow a read-only pointer to the first element.
 For example, the result for `[]u8` has type `*const u8`.
+
+## Dynamic memory
+
+`std.mem` provides independent arenas. Start with a zero-initialized
+`mem.Arena` and call `mem.init(&arena, block_size)` to set the minimum size
+of each backing block. `mem.alloc(&arena, size, align, &ptr)` writes a `*u8`
+on success. Both size and alignment must be positive, and alignment must be a
+power of two. Allocation leaves the output pointer untouched on failure.
+Successful allocations keep their addresses as the arena grows. Their
+contents may carry over from earlier use and should be initialized by the
+caller.
+
+`mem.reset(&arena)` invalidates that arena's allocations and keeps its
+blocks for reuse. `mem.deinit(&arena)` releases the blocks. A successful
+deinitialization leaves the arena ready for another call to `init`. Keep
+each initialized arena in one place and pass its address. `init`, `alloc`,
+and `deinit` return zero on success or a negative error code.
+
+On Linux x86-64, the same platform object used by `std.io` provides the
+memory mappings through direct syscalls.
+
+```sh
+make build/lunso build/std-linux-x86_64.o
+./build/lunso --build examples/arena.lunso -o build/arena-demo --link build/std-linux-x86_64.o
+./build/arena-demo
+```
+
+Indexing a raw pointer with `ptr[i]` uses the size of its pointee and has no
+bounds check. Only a writable pointer allows stores. Casts between typed and
+byte pointers preserve read-only access. `size_of(value)` produces a `u64`
+byte size at compile time without evaluating the value.

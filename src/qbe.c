@@ -147,6 +147,16 @@ static void write_length(FILE *out, SemaType type, uint32_t value)
     }
 }
 
+static void write_index_address(FILE *out, IrInstruction inst, uint32_t size)
+{
+    if (size != 1) {
+        fprintf(out, "\t%%off%" PRIu32 " =l mul %%v%" PRIu32 ", %" PRIu32 "\n",
+                inst.result, inst.b, size);
+    }
+    fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %%%s%" PRIu32 "\n",
+            inst.result, inst.a, size == 1 ? "v" : "off", size == 1 ? inst.b : inst.result);
+}
+
 static void write_access(FILE *out, IrInstruction inst)
 {
     bool slice = inst.op == IR_SLICE;
@@ -165,13 +175,7 @@ static void write_access(FILE *out, IrInstruction inst)
     fprintf(out, "\tjnz %%in%" PRIu32 ", @array_ok%" PRIu32 ", @bounds_fail\n",
             inst.result, inst.result);
     fprintf(out, "@array_ok%" PRIu32 "\n", inst.result);
-    uint32_t size = sema_element_size(inst.type);
-    if (size != 1) {
-        fprintf(out, "\t%%off%" PRIu32 " =l mul %%v%" PRIu32 ", %" PRIu32 "\n",
-                inst.result, inst.b, size);
-    }
-    fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %%%s%" PRIu32 "\n",
-            inst.result, inst.a, size == 1 ? "v" : "off", size == 1 ? inst.b : inst.result);
+    write_index_address(out, inst, sema_element_size(inst.type));
     if (slice) {
         fprintf(out, "\t%%len%" PRIu32 " =l sub %%v%" PRIu32 ", %%v%" PRIu32 "\n",
                 inst.result, inst.c, inst.b);
@@ -289,8 +293,8 @@ static void write_operation(FILE *out, IrInstruction inst)
     }
 }
 
-static void write_integer_cast(FILE *out, uint32_t result, uint32_t value,
-                               TypeKind source, TypeKind destination)
+static void write_cast(FILE *out, uint32_t result, uint32_t value,
+                       TypeKind source, TypeKind destination)
 {
     QbeType target = types[destination];
     const char *op = target.extend ? target.extend : "copy";
@@ -312,7 +316,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         write_number(out, module, inst);
         break;
     case IR_BOOL:
-    case IR_ZERO:
+    case IR_IMMEDIATE:
         fprintf(out, "\t%%v%" PRIu32 " =%c copy %" PRIu32 "\n",
                 inst.result, types[inst.type.kind].base, inst.a);
         if (inst.type.kind == TYPE_SLICE) {
@@ -351,10 +355,10 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         write_storage_init(out, inst, index);
         break;
     case IR_WIDEN_INDEX:
-        write_integer_cast(out, inst.result, inst.a, inst.type.kind, TYPE_U64);
+        write_cast(out, inst.result, inst.a, inst.type.kind, TYPE_U64);
         break;
-    case IR_INT_CAST:
-        write_integer_cast(out, inst.result, inst.a, inst.b, inst.type.kind);
+    case IR_CAST:
+        write_cast(out, inst.result, inst.a, inst.b, inst.type.kind);
         break;
     case IR_FLOAT_EXTEND:
         fprintf(out, "\t%%v%" PRIu32 " =d exts %%v%" PRIu32 "\n", inst.result, inst.a);
@@ -362,6 +366,10 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
     case IR_ELEMENT_ADDRESS:
     case IR_SLICE:
         write_access(out, inst);
+        break;
+    case IR_POINTER_INDEX:
+        write_index_address(out, inst, inst.type.kind == TYPE_STRUCT ? inst.type.record_size
+                                                                     : sema_scalar_size(inst.type.kind));
         break;
     case IR_FIELD_ADDRESS:
         fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %" PRIu32 "\n",

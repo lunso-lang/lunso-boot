@@ -5,11 +5,11 @@
 #include "sema.h"
 
 typedef enum {
-    IR_LABEL, IR_NUMBER, IR_BOOL, IR_BYTES, IR_ZERO, IR_LOAD, IR_STORE, IR_CALL,
-    IR_STORAGE_ALLOC, IR_STORAGE_INIT, IR_WIDEN_INDEX, IR_ELEMENT_ADDRESS,
+    IR_LABEL, IR_NUMBER, IR_BOOL, IR_BYTES, IR_IMMEDIATE, IR_LOAD, IR_STORE, IR_CALL,
+    IR_STORAGE_ALLOC, IR_STORAGE_INIT, IR_WIDEN_INDEX, IR_ELEMENT_ADDRESS, IR_POINTER_INDEX,
     IR_FIELD_ADDRESS, IR_LOCAL_ADDRESS, IR_MEMORY_LOAD, IR_MEMORY_STORE,
     IR_SLICE, IR_ARRAY_VIEW, IR_LEN, IR_DATA,
-    IR_INT_CAST, IR_FLOAT_EXTEND,
+    IR_CAST, IR_FLOAT_EXTEND,
     IR_JUMP, IR_BRANCH, IR_RETURN,
     IR_NEGATE, IR_LOGICAL_NOT, IR_BIT_NOT,
     IR_ADD, IR_SUBTRACT, IR_MULTIPLY, IR_DIVIDE, IR_REMAINDER,
@@ -23,7 +23,8 @@ typedef enum {
 // access uses the scalar type, and field addresses carry their byte offset in b.
 // A local address carries the addressed slot's type and index (a).
 // Bounds are widened before use.
-// An integer cast stores the destination type and the source type kind in b.
+// A pointer index carries the pointee type. A cast carries the destination type
+// and the source type kind in b. An immediate carries its constant in a.
 // A call stores a function index, the first argument index, and the argument count.
 // Comparison instructions use the operand type and produce a bool value.
 typedef struct {

@@ -110,7 +110,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
     case IR_NUMBER:
     case IR_BOOL:
     case IR_BYTES:
-    case IR_ZERO:
+    case IR_IMMEDIATE:
         fputs("const.", output);
         write_type(output, module, instruction.type);
         fputc(' ', output);
@@ -124,7 +124,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         } else if (instruction.type.kind == TYPE_BOOL) {
             fputs(instruction.a ? "true" : "false", output);
         } else {
-            fputc('0', output);
+            fprintf(output, "%" PRIu32, instruction.a);
         }
         break;
     case IR_LOAD:
@@ -171,7 +171,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         fputc(' ', output);
         write_value(output, instruction.a);
         break;
-    case IR_INT_CAST:
+    case IR_CAST:
         fputs("cast.", output);
         write_type(output, module, instruction.type);
         fprintf(output, " %s ", sema_type_name(instruction.b));
@@ -189,10 +189,12 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         fprintf(output, ", %" PRIu32, instruction.b);
         break;
     case IR_ELEMENT_ADDRESS:
+    case IR_POINTER_INDEX:
     case IR_MEMORY_STORE:
     case IR_SLICE:
         fputs(instruction.op == IR_SLICE ? "slice." :
-              instruction.op == IR_ELEMENT_ADDRESS ? "element_address." : "store_memory.", output);
+              instruction.op == IR_ELEMENT_ADDRESS ? "element_address." :
+              instruction.op == IR_POINTER_INDEX ? "pointer_index." : "store_memory.", output);
         write_type(output, module, instruction.type);
         fputc(' ', output);
         write_value(output, instruction.a);

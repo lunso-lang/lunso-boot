@@ -21,7 +21,7 @@ typedef struct {
     bool read_only;        // The pointer (or a pointer element) gives read-only access.
 } SemaType;
 
-typedef enum { BUILTIN_NONE, BUILTIN_LEN, BUILTIN_DATA } SemaBuiltin;
+typedef enum { BUILTIN_NONE, BUILTIN_LEN, BUILTIN_DATA, BUILTIN_SIZE_OF } SemaBuiltin;
 
 typedef struct {
     SemaType type;

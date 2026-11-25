@@ -133,8 +133,11 @@ static uint32_t lower_element_address(Lowering *lowering, AstNodeId id)
     AstNodeData node = lowering->ast->data[id];
     uint32_t base = lower_expression(lowering, node.a);
     uint32_t index = lower_index(lowering, node.b);
-    return emit_value(lowering, IR_ELEMENT_ADDRESS, lowering->sema->nodes[node.a].type,
-                      base, index, 0);
+    SemaType type = lowering->sema->nodes[node.a].type;
+    if (type.kind == TYPE_POINTER) {
+        return emit_value(lowering, IR_POINTER_INDEX, lowering->sema->nodes[id].type, base, index, 0);
+    }
+    return emit_value(lowering, IR_ELEMENT_ADDRESS, type, base, index, 0);
 }
 
 static uint32_t lower_memory_address(Lowering *lowering, AstNodeId id)
@@ -168,6 +171,9 @@ static uint32_t lower_call(Lowering *lowering, AstNodeId id)
     IrModule *module = lowering->module;
     SemaNode info = lowering->sema->nodes[id];
     AstNodeData call = ast->data[id];
+    if (info.builtin == BUILTIN_SIZE_OF) {
+        return emit_value(lowering, IR_IMMEDIATE, info.type, info.binding, 0, 0);
+    }
     if (info.builtin != BUILTIN_NONE) {
         AstNodeId argument = ast->children[call.a + 1];
         uint32_t value = lower_expression(lowering, argument);
@@ -299,7 +305,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         return lower_call(lowering, id);
     case AST_CAST: {
         uint32_t source = lower_expression(lowering, data.a);
-        return emit_value(lowering, IR_INT_CAST, info.type, source,
+        return emit_value(lowering, IR_CAST, info.type, source,
                           lowering->sema->nodes[data.a].type.kind, 0);
     }
     case AST_ADDRESS_OF: {
@@ -351,7 +357,7 @@ static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
         return emit_value(lowering, IR_ARRAY_VIEW, info.type, value, 0, 0);
     }
     if (info.promotion != TYPE_INVALID) {
-        IrOp op = info.promotion == TYPE_F64 ? IR_FLOAT_EXTEND : IR_INT_CAST;
+        IrOp op = info.promotion == TYPE_F64 ? IR_FLOAT_EXTEND : IR_CAST;
         return emit_value(lowering, op, (SemaType){.kind = info.promotion},
                           value, info.type.kind, 0);
     }
@@ -459,7 +465,7 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
             break;
         }
         uint32_t value = initializer ? lower_expression(lowering, initializer)
-                                     : emit_value(lowering, IR_ZERO, info.type, 0, 0, 0);
+                                     : emit_value(lowering, IR_IMMEDIATE, info.type, 0, 0, 0);
         store(lowering, info.type, info.binding, value);
         break;
     }

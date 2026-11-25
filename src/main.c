@@ -3,6 +3,7 @@
 #include "sema.h"
 #include "ir.h"
 #include "qbe.h"
+#include "native.h"
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -10,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR, MODE_EMIT_QBE } Mode;
+typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR, MODE_EMIT_QBE, MODE_BUILD } Mode;
 
 static unsigned char *read_source(FILE *file, size_t *length)
 {
@@ -176,7 +177,8 @@ static int report_offset_error(const char *path, const unsigned char *source, Se
     return report_source_error(path, source, token, error.message);
 }
 
-static int process_source(Mode mode, const char *path, const unsigned char *source, size_t length)
+static int process_source(Mode mode, const char *path, const unsigned char *source, size_t length,
+                          const char *output)
 {
     Ast ast;
     ParseError error;
@@ -185,20 +187,25 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     }
 
     int result = EXIT_SUCCESS;
-    if (mode == MODE_CHECK || mode == MODE_EMIT_IR || mode == MODE_EMIT_QBE) {
+    if (mode != MODE_PARSE) {
         Sema sema;
         SemaError semantic_error;
         if (!sema_check(&ast, &sema, &semantic_error)) {
             ast_destroy(&ast);
             return report_offset_error(path, source, semantic_error);
         }
-        if (mode == MODE_EMIT_IR || mode == MODE_EMIT_QBE) {
+        if (mode != MODE_CHECK) {
             IrModule ir;
             if (!ir_lower(&ast, &sema, &ir)) {
                 fprintf(stderr, "%s: could not allocate IR storage\n", path);
                 result = EXIT_FAILURE;
             } else {
-                bool written = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
+                bool written;
+                if (mode == MODE_BUILD) {
+                    written = native_build(&ir, path, output);
+                } else {
+                    written = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
+                }
                 if (!written) {
                     result = EXIT_FAILURE;
                 }
@@ -228,10 +235,14 @@ int main(int argc, char **argv)
         mode = MODE_EMIT_IR;
     } else if (argc > 1 && strcmp(argv[1], "--emit-qbe") == 0) {
         mode = MODE_EMIT_QBE;
+    } else if (argc > 1 && strcmp(argv[1], "--build") == 0) {
+        mode = MODE_BUILD;
     }
-    if (argc != (mode == MODE_TOKENS ? 2 : 3)) {
+    int expected = mode == MODE_TOKENS ? 2 : (mode == MODE_BUILD ? 5 : 3);
+    if (argc != expected || (mode == MODE_BUILD && strcmp(argv[3], "-o") != 0)) {
         fprintf(stderr, "usage: %s [--parse | --check | --emit-ir | --emit-qbe] <source.lunso>\n",
                 argv[0]);
+        fprintf(stderr, "       %s --build <source.lunso> -o <executable>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
@@ -250,8 +261,9 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    const char *output = mode == MODE_BUILD ? argv[4] : NULL;
     int result = mode == MODE_TOKENS ? dump_tokens(path, source, length)
-                                     : process_source(mode, path, source, length);
+                                     : process_source(mode, path, source, length, output);
     free(source);
     return result;
 }

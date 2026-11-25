@@ -68,4 +68,67 @@ lunso_mem_unmap:
     ret
 .size lunso_mem_unmap, .-lunso_mem_unmap
 
+.globl lunso_sys_fork
+.type lunso_sys_fork, @function
+lunso_sys_fork:
+    mov $57, %eax          # fork
+    syscall
+    ret
+.size lunso_sys_fork, .-lunso_sys_fork
+
+.globl lunso_sys_execve
+.type lunso_sys_execve, @function
+lunso_sys_execve:
+    mov $59, %eax          # execve
+    syscall
+    ret
+.size lunso_sys_execve, .-lunso_sys_execve
+
+.globl lunso_sys_exit
+.type lunso_sys_exit, @function
+lunso_sys_exit:
+    mov $60, %eax          # exit
+    syscall
+.size lunso_sys_exit, .-lunso_sys_exit
+
+.globl lunso_sys_wait4
+.type lunso_sys_wait4, @function
+lunso_sys_wait4:
+    xor %edx, %edx         # options = 0
+    xor %r10d, %r10d       # rusage = NULL
+    mov $61, %eax          # wait4
+    syscall
+    ret
+.size lunso_sys_wait4, .-lunso_sys_wait4
+
+.globl lunso_sys_access
+.type lunso_sys_access, @function
+lunso_sys_access:
+    mov $21, %eax          # access
+    syscall
+    ret
+.size lunso_sys_access, .-lunso_sys_access
+
+.globl lunso_sys_mkdir
+.type lunso_sys_mkdir, @function
+lunso_sys_mkdir:
+    mov %rdi, %rsi         # pathname
+    mov $-100, %edi        # AT_FDCWD
+    mov $0755, %edx        # mode
+    mov $258, %eax         # mkdirat
+    syscall
+    ret
+.size lunso_sys_mkdir, .-lunso_sys_mkdir
+
+.globl lunso_sys_unlink
+.type lunso_sys_unlink, @function
+lunso_sys_unlink:
+    mov %esi, %edx         # flags (0 or AT_REMOVEDIR)
+    mov %rdi, %rsi         # pathname
+    mov $-100, %edi        # AT_FDCWD
+    mov $263, %eax         # unlinkat
+    syscall
+    ret
+.size lunso_sys_unlink, .-lunso_sys_unlink
+
 .section .note.GNU-stack,"",@progbits

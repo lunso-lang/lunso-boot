@@ -122,6 +122,24 @@ static void store(Lowering *lowering, SemaType type, uint32_t slot, uint32_t val
     emit(lowering, (IrInstruction){.op = IR_STORE, .type = type, .a = slot, .b = value});
 }
 
+static uint32_t lower_const(Lowering *lowering, SemaNode info)
+{
+    const Ast *ast = lowering->ast;
+    AstNodeId str_node = lowering->sema->const_strings[info.binding];
+    if (str_node != AST_NODE_NONE) {
+        SemaType str_type = lowering->sema->nodes[str_node].type;
+        uint32_t bytes = emit_value(lowering, IR_BYTES, str_type,
+                                    ast->positions[str_node], ast->data[str_node].a, 0);
+        if (info.type.kind == TYPE_SLICE) {
+            return emit_value(lowering, IR_ARRAY_VIEW, str_type, bytes, 0, 0);
+        }
+        return bytes;
+    }
+    uint64_t bits = lowering->sema->const_values[info.binding];
+    return emit_value(lowering, info.type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
+                      info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+}
+
 static uint32_t lower_expression(Lowering *lowering, AstNodeId id);
 static void lower_statement(Lowering *lowering, AstNodeId id);
 
@@ -302,9 +320,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
     switch (kind) {
     case AST_IDENTIFIER:
         if (info.is_const) {
-            uint64_t bits = lowering->sema->const_values[info.binding];
-            return emit_value(lowering, info.type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
-                              info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+            return lower_const(lowering, info);
         }
         return emit_value(lowering, info.is_boolean_literal ? IR_BOOL : IR_LOAD,
                           info.type, info.binding, 0, 0);
@@ -369,11 +385,12 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
     case AST_INDEX:
     case AST_MEMBER:
     case AST_DEREFERENCE: {
-        if (info.is_enum_case || info.is_const) {
-            uint64_t bits = info.is_const ? lowering->sema->const_values[info.binding]
-                                          : lowering->sema->enum_values[info.binding];
-            return emit_value(lowering, info.type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
-                              info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+        if (info.is_const) {
+            return lower_const(lowering, info);
+        }
+        if (info.is_enum_case) {
+            uint64_t bits = lowering->sema->enum_values[info.binding];
+            return emit_value(lowering, IR_IMMEDIATE, info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
         }
         uint32_t address = lower_memory_address(lowering, id);
         return uses_storage(info.type) ? address
@@ -523,6 +540,8 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
         break;
     case AST_CONTINUE:
         jump(lowering, lowering->loops[lowering->sema->nodes[id].binding].continue_label);
+        break;
+    case AST_CONST:
         break;
     case AST_VAR: {
         SemaNode info = lowering->sema->nodes[id];

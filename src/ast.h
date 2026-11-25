@@ -137,6 +137,7 @@ typedef struct {
     AstNodeId value;
     uint32_t module;
     bool public;
+    bool local;
 } AstConst;
 
 typedef enum { IMPORT_MODULE, IMPORT_ALL, IMPORT_SELECTED } AstImportKind;

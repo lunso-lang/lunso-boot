@@ -251,7 +251,7 @@ static void emit_expr(StrBuf *sb, int depth)
 
 static void emit_stmt(StrBuf *sb, int depth)
 {
-    switch (rng_range(depth > 0 ? 9 : 3)) {
+    switch (rng_range(depth > 0 ? 10 : 3)) {
     case 0: {
         int form = (int)rng_range(3);
         sb_append(sb, "var v%zu", rng_range(5));
@@ -314,6 +314,9 @@ static void emit_stmt(StrBuf *sb, int depth)
         }
         sb_append(sb, "}\n");
         break;
+    case 9:
+        sb_append(sb, "const LC%d = %zu\n", depth, rng_range(50));
+        break;
     }
 }
 
@@ -359,6 +362,9 @@ static void gen_valid_program(StrBuf *sb)
             sb_append(sb, ": i32");
         }
         sb_append(sb, " = %zu\n", rng_range(100));
+    }
+    if (rng_range(2) == 0) {
+        sb_append(sb, "const S_MSG = \"hi\"\n");
     }
 
     sb_append(sb, "fun main(");

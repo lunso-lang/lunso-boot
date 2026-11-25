@@ -46,6 +46,7 @@ typedef struct {
     SemaType *pointees;
     uint64_t *enum_values;
     uint64_t *const_values;
+    AstNodeId *const_strings;
     uint32_t pointee_count;
 } Sema;
 

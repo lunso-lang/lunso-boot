@@ -332,7 +332,7 @@ static bool declaration_name(const Ast *ast, AstNodeId id, AstSpan *name,
         *kind = BIND_ENUM;
         return true;
     }
-    if (ast->kinds[id] == AST_CONST) {
+    if (ast->kinds[id] == AST_CONST && !ast->consts[index].local) {
         *name = ast->consts[index].name;
         *public = ast->consts[index].public;
         *kind = BIND_CONST;

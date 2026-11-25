@@ -74,6 +74,7 @@ static AstNodeId parse_expression(Parser *parser, unsigned minimum);
 static AstNodeId parse_block(Parser *parser);
 static AstNodeId parse_type(Parser *parser);
 static AstSpan source_span(const Parser *parser, Token token);
+static AstNodeId parse_const(Parser *parser, bool public, bool local);
 
 static bool failed(const Parser *parser)
 {
@@ -627,6 +628,8 @@ static AstNodeId parse_statement(Parser *parser)
     }
     case TOKEN_VAR:
         return parse_variable(parser);
+    case TOKEN_CONST:
+        return parse_const(parser, false, true);
     case TOKEN_RETURN: {
         advance(parser);
         TokenKind next = parser->current.kind;
@@ -807,7 +810,7 @@ static AstNodeId parse_enum(Parser *parser, bool public)
     return add_node(parser, AST_ENUM, keyword, index, 0);
 }
 
-static AstNodeId parse_const(Parser *parser, bool public)
+static AstNodeId parse_const(Parser *parser, bool public, bool local)
 {
     Token keyword = expect(parser, TOKEN_CONST, "expected 'const'");
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a constant name");
@@ -823,6 +826,7 @@ static AstNodeId parse_const(Parser *parser, bool public)
         .value = value,
         .module = parser->module,
         .public = public,
+        .local = local,
     };
     uint32_t index = 0;
     if (!failed(parser) && !ast_add_const(parser->builder, constant, &index)) {
@@ -903,7 +907,7 @@ bool parser_append(AstBuilder *builder, const unsigned char *source, uint32_t le
                 message = NULL;
                 break;
             case TOKEN_CONST:
-                declaration = parse_const(&parser, public);
+                declaration = parse_const(&parser, public, false);
                 message = "expected a newline or ';' after constant";
                 break;
             default:

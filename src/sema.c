@@ -1425,7 +1425,11 @@ static SemaType check_cast(Checker *checker, AstNodeId id)
     SemaType source = value(checker, node.a, source_hint);
     if ((is_integer(source.kind) && is_integer(target.kind) &&
          (!is_enum(source) || !is_enum(target) || same_type(source, target))) ||
-        (source.kind == TYPE_POINTER && target.kind == TYPE_U64)) {
+        (!is_enum(source) && !is_enum(target) &&
+         (is_numeric(source.kind) || source.kind == TYPE_BOOL) &&
+         (is_numeric(target.kind) || target.kind == TYPE_BOOL)) ||
+        (source.kind == TYPE_POINTER && target.kind == TYPE_U64) ||
+        (source.kind == TYPE_U64 && target.kind == TYPE_POINTER)) {
         return target;
     }
     if (source.kind == TYPE_POINTER && target.kind == TYPE_POINTER) {
@@ -2185,8 +2189,8 @@ static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
         if (failed(checker)) {
             break;
         }
-        if (!is_integer(target.kind) && !is_float(target.kind)) {
-            fail(checker, node.b, "constant cast requires a numeric or enum type");
+        if (!is_integer(target.kind) && !is_float(target.kind) && target.kind != TYPE_BOOL) {
+            fail(checker, node.b, "constant cast requires a numeric, bool, or enum type");
             break;
         }
         uint64_t src_bits = 0;
@@ -2195,8 +2199,23 @@ static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
         if (failed(checker)) {
             break;
         }
-        if (is_integer(target.kind) && is_integer(src.kind)) {
-            bits = normalize_int_bits(target.kind, src_bits);
+        if (target.kind == TYPE_BOOL && !is_enum(src) && (is_integer(src.kind) || src.kind == TYPE_BOOL)) {
+            bits = src_bits != 0;
+        } else if (target.kind == TYPE_BOOL && is_float(src.kind)) {
+            bits = read_float_bits(src.kind, src_bits) != 0.0;
+        } else if (is_integer(target.kind) && (is_integer(src.kind) || src.kind == TYPE_BOOL) &&
+                   (!is_enum(src) || !is_enum(target) || same_type(src, target))) {
+            bits = normalize_int_bits(target.kind, src.kind == TYPE_BOOL ? (src_bits != 0) : src_bits);
+        } else if (is_integer(target.kind) && !is_enum(target) && is_float(src.kind)) {
+            double d = read_float_bits(src.kind, src_bits);
+            bits = is_signed(target.kind)
+                   ? normalize_int_bits(target.kind, (uint64_t)(int64_t)d)
+                   : normalize_int_bits(target.kind, (uint64_t)d);
+        } else if (is_float(target.kind) && !is_enum(src) && is_integer(src.kind)) {
+            double d = is_signed(src.kind) ? (double)(int64_t)src_bits : (double)src_bits;
+            bits = write_float_bits(target.kind, d);
+        } else if (is_float(target.kind) && src.kind == TYPE_BOOL) {
+            bits = write_float_bits(target.kind, src_bits ? 1.0 : 0.0);
         } else if (is_float(target.kind) && is_float(src.kind)) {
             bits = write_float_bits(target.kind, read_float_bits(src.kind, src_bits));
         } else {

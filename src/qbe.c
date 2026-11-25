@@ -355,8 +355,56 @@ static void write_cast(FILE *out, uint32_t result, uint32_t value,
                        TypeKind source, TypeKind destination)
 {
     QbeType target = types[destination];
+    QbeType src = types[source];
+    if (destination == TYPE_BOOL) {
+        if (source == TYPE_BOOL) {
+            fprintf(out, "\t%%v%" PRIu32 " =w copy %%v%" PRIu32 "\n", result, value);
+        } else if (src.base == 's' || src.base == 'd') {
+            fprintf(out, "\t%%v%" PRIu32 " =w cne%c %%v%" PRIu32 ", %c_0\n",
+                    result, src.base, value, src.base);
+        } else {
+            fprintf(out, "\t%%v%" PRIu32 " =w cne%c %%v%" PRIu32 ", 0\n",
+                    result, src.base, value);
+        }
+        return;
+    }
+    if (source == TYPE_BOOL && (target.base == 's' || target.base == 'd')) {
+        fprintf(out, "\t%%v%" PRIu32 " =%c uwtof %%v%" PRIu32 "\n", result, target.base, value);
+        return;
+    }
+    if (source == TYPE_F32 && destination == TYPE_F64) {
+        fprintf(out, "\t%%v%" PRIu32 " =d exts %%v%" PRIu32 "\n", result, value);
+        return;
+    }
+    if (source == TYPE_F64 && destination == TYPE_F32) {
+        fprintf(out, "\t%%v%" PRIu32 " =s truncd %%v%" PRIu32 "\n", result, value);
+        return;
+    }
+    if ((src.base == 's' || src.base == 'd') && (target.base == 'w' || target.base == 'l')) {
+        const char *conv = src.base == 's'
+                           ? (is_signed(destination) ? "stosi" : "stoui")
+                           : (is_signed(destination) ? "dtosi" : "dtoui");
+        if (target.extend) {
+            fprintf(out, "\t%%raw%" PRIu32 " =w %s %%v%" PRIu32 "\n", result, conv, value);
+            fprintf(out, "\t%%v%" PRIu32 " =w %s %%raw%" PRIu32 "\n",
+                    result, target.extend, result);
+        } else {
+            fprintf(out, "\t%%v%" PRIu32 " =%c %s %%v%" PRIu32 "\n",
+                    result, target.base, conv, value);
+        }
+        return;
+    }
+    if ((src.base == 'w' || src.base == 'l') && (target.base == 's' || target.base == 'd')) {
+        const char *conv = src.base == 'w'
+                           ? (is_signed(source) ? "swtof" : "uwtof")
+                           : (is_signed(source) ? "sltof" : "ultof");
+        fprintf(out, "\t%%v%" PRIu32 " =%c %s %%v%" PRIu32 "\n",
+                result, target.base, conv, value);
+        return;
+    }
+
     const char *op = target.extend ? target.extend : "copy";
-    if (target.base == 'l' && types[source].base == 'w') {
+    if (target.base == 'l' && src.base == 'w') {
         op = is_signed(source) ? "extsw" : "extuw";
     }
     fprintf(out, "\t%%v%" PRIu32 " =%c %s %%v%" PRIu32 "\n", result, target.base, op, value);

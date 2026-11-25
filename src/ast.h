@@ -26,7 +26,9 @@ enum {
     AST_BLOCK,   // a: first item in children, b: item count
     AST_RETURN,  // a: value node or AST_NODE_NONE
     AST_IF,      // a: condition node, b: if_branches index
-    AST_FOR,     // a: condition node, b: body block
+    AST_FOR,          // a: condition node or AST_NODE_NONE, b: body block
+    AST_FOR_C_STYLE,  // a: for_headers index, b: body block
+    AST_VAR,          // a: variables index, position: variable name
 
     AST_IDENTIFIER,  // a: name length
     AST_INTEGER,     // a: raw literal length in bytes
@@ -97,6 +99,19 @@ typedef struct {
 } AstIfBranches;
 
 typedef struct {
+    // An omitted clause is AST_NODE_NONE.
+    AstNodeId initializer;
+    AstNodeId condition;
+    AstNodeId step;
+} AstForHeader;
+
+typedef struct {
+    uint32_t name_length;
+    AstNodeId type;
+    AstNodeId initializer;  // AST_NODE_NONE if absent.
+} AstVariable;
+
+typedef struct {
     const unsigned char *source;  // Borrowed for the life of the AST.
     uint32_t source_length;
 
@@ -115,6 +130,10 @@ typedef struct {
     uint32_t function_count;
     AstIfBranches *if_branches;
     uint32_t if_branch_count;
+    AstForHeader *for_headers;
+    uint32_t for_header_count;
+    AstVariable *variables;
+    uint32_t variable_count;
 
     AstNodeRange declarations;  // Top-level nodes in children, in source order.
 } Ast;

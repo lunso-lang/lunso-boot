@@ -357,18 +357,79 @@ static AstNodeId parse_if(Parser *parser)
     return add_node(parser, AST_IF, keyword, condition, index);
 }
 
+static AstNodeId parse_type(Parser *parser)
+{
+    Token type = expect(parser, TOKEN_IDENTIFIER, "expected a type name");
+    return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
+}
+
+static AstNodeId parse_for_variable(Parser *parser)
+{
+    advance(parser);
+    Token name = expect(parser, TOKEN_IDENTIFIER, "expected a variable name after 'var'");
+    expect(parser, TOKEN_COLON, "expected ':' after variable name");
+    AstVariable variable = {.name_length = (uint32_t)name.length, .type = parse_type(parser)};
+    if (match(parser, TOKEN_EQUAL)) {
+        variable.initializer = parse_expression(parser, PREC_ASSIGNMENT);
+    }
+
+    uint32_t index = 0;
+    if (!failed(parser) && !ast_add_variable(&parser->builder, variable, &index)) {
+        fail(parser, "could not allocate AST storage");
+    }
+    return add_node(parser, AST_VAR, name, index, 0);
+}
+
+static AstNodeId parse_for(Parser *parser)
+{
+    Token keyword = parser->current;
+    advance(parser);
+    if (parser->current.kind == TOKEN_LEFT_BRACE) {
+        AstNodeId body = parse_block(parser);
+        return add_node(parser, AST_FOR, keyword, AST_NODE_NONE, body);
+    }
+
+    bool declares_variable = parser->current.kind == TOKEN_VAR;
+    AstNodeId first = AST_NODE_NONE;
+    if (declares_variable) {
+        first = parse_for_variable(parser);
+    } else if (parser->current.kind != TOKEN_SEMICOLON) {
+        first = parse_expression(parser, PREC_ASSIGNMENT);
+    }
+
+    if (!match(parser, TOKEN_SEMICOLON)) {
+        if (declares_variable) {
+            fail(parser, "expected ';' after for initializer");
+        }
+        AstNodeId body = parse_block(parser);
+        return add_node(parser, AST_FOR, keyword, first, body);
+    }
+
+    AstForHeader header = {.initializer = first};
+    if (parser->current.kind != TOKEN_SEMICOLON) {
+        header.condition = parse_expression(parser, PREC_ASSIGNMENT);
+    }
+    expect(parser, TOKEN_SEMICOLON, "expected ';' after for condition");
+    if (parser->current.kind != TOKEN_LEFT_BRACE) {
+        header.step = parse_expression(parser, PREC_ASSIGNMENT);
+    }
+    AstNodeId body = parse_block(parser);
+
+    uint32_t index = 0;
+    if (!failed(parser) && !ast_add_for_header(&parser->builder, header, &index)) {
+        fail(parser, "could not allocate AST storage");
+    }
+    return add_node(parser, AST_FOR_C_STYLE, keyword, index, body);
+}
+
 static AstNodeId parse_statement(Parser *parser)
 {
     Token token = parser->current;
     switch (token.kind) {
     case TOKEN_IF:
         return parse_if(parser);
-    case TOKEN_FOR: {
-        advance(parser);
-        AstNodeId condition = parse_expression(parser, PREC_ASSIGNMENT);
-        AstNodeId body = parse_block(parser);
-        return add_node(parser, AST_FOR, token, condition, body);
-    }
+    case TOKEN_FOR:
+        return parse_for(parser);
     case TOKEN_RETURN: {
         advance(parser);
         TokenKind next = parser->current.kind;
@@ -405,12 +466,6 @@ static AstNodeId parse_block(Parser *parser)
     AstNodeRange statements = finish_children(parser, mark);
     parser->recursion_depth--;
     return add_node(parser, AST_BLOCK, opening, statements.first, statements.count);
-}
-
-static AstNodeId parse_type(Parser *parser)
-{
-    Token type = expect(parser, TOKEN_IDENTIFIER, "expected a type name");
-    return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
 }
 
 static AstNodeRange parse_parameters(Parser *parser)

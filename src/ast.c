@@ -113,6 +113,40 @@ bool ast_add_if_branches(AstBuilder *builder, AstIfBranches branches, uint32_t *
     return true;
 }
 
+bool ast_add_for_header(AstBuilder *builder, AstForHeader header, uint32_t *index)
+{
+    Ast *ast = &builder->ast;
+    if (ast->for_header_count == UINT32_MAX) {
+        return false;
+    }
+    AstForHeader *items = reserve(ast->for_headers, &builder->for_header_capacity,
+                                  ast->for_header_count + 1, sizeof(*items));
+    if (!items) {
+        return false;
+    }
+    ast->for_headers = items;
+    *index = ast->for_header_count++;
+    ast->for_headers[*index] = header;
+    return true;
+}
+
+bool ast_add_variable(AstBuilder *builder, AstVariable variable, uint32_t *index)
+{
+    Ast *ast = &builder->ast;
+    if (ast->variable_count == UINT32_MAX) {
+        return false;
+    }
+    AstVariable *items = reserve(ast->variables, &builder->variable_capacity,
+                                  ast->variable_count + 1, sizeof(*items));
+    if (!items) {
+        return false;
+    }
+    ast->variables = items;
+    *index = ast->variable_count++;
+    ast->variables[*index] = variable;
+    return true;
+}
+
 bool ast_push_child(AstBuilder *builder, AstNodeId child)
 {
     if (builder->pending_count == UINT32_MAX) {
@@ -159,5 +193,7 @@ void ast_destroy(Ast *ast)
     free(ast->children);
     free(ast->functions);
     free(ast->if_branches);
+    free(ast->for_headers);
+    free(ast->variables);
     *ast = (Ast){0};
 }

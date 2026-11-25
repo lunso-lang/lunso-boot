@@ -71,6 +71,7 @@ static TokenKind scan_identifier(Lexer *lexer, size_t start)
         {"if", TOKEN_IF},
         {"else", TOKEN_ELSE},
         {"for", TOKEN_FOR},
+        {"var", TOKEN_VAR},
     };
 
     while (is_identifier_continue(peek(lexer))) {

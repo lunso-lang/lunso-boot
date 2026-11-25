@@ -8,6 +8,7 @@ typedef enum {
     TOKEN_IF,
     TOKEN_ELSE,
     TOKEN_FOR,
+    TOKEN_VAR,
     TOKEN_IDENTIFIER,
     TOKEN_INTEGER,
     TOKEN_FLOAT,

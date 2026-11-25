@@ -63,9 +63,7 @@ static void write_integer_bits(FILE *out, uint64_t bits)
 static void write_integer(FILE *out, const unsigned char *text, uint32_t length, bool negative)
 {
     uint64_t bits = 0;
-    for (uint32_t i = 0; i < length; i++) {
-        bits = bits * 10 + (unsigned)(text[i] - '0');
-    }
+    (void)literal_integer_value(text, length, &bits);
     if (negative) {
         bits = 0 - bits;
     }

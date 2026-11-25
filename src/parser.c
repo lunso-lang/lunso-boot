@@ -290,11 +290,13 @@ static AstNodeId parse_operand(Parser *parser)
     }
     case TOKEN_IDENTIFIER:
     case TOKEN_INTEGER:
+    case TOKEN_CHAR:
     case TOKEN_FLOAT:
     case TOKEN_STRING: {
         static const AstKind literal_kinds[] = {
             [TOKEN_IDENTIFIER] = AST_IDENTIFIER,
             [TOKEN_INTEGER] = AST_INTEGER,
+            [TOKEN_CHAR] = AST_INTEGER,
             [TOKEN_FLOAT] = AST_FLOAT,
             [TOKEN_STRING] = AST_STRING,
         };
@@ -664,7 +666,12 @@ static AstNodeId parse_enum(Parser *parser, bool public)
         if (match(parser, TOKEN_EQUAL)) {
             Token sign = parser->current;
             bool negative = match(parser, TOKEN_MINUS);
-            Token literal = expect(parser, TOKEN_INTEGER, "expected an integer enum value");
+            Token literal = parser->current;
+            if (literal.kind == TOKEN_CHAR) {
+                advance(parser);
+            } else {
+                literal = expect(parser, TOKEN_INTEGER, "expected an integer enum value");
+            }
             value = add_node(parser, AST_INTEGER, literal, (uint32_t)literal.length, 0);
             if (negative) {
                 value = add_node(parser, AST_NEGATE, sign, value, 0);

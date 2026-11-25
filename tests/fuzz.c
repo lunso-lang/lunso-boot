@@ -76,7 +76,7 @@ static const char *const TOKENS[] = {
     "i32", "i64", "u8", "u64", "f64", "bool", "len(", "data(", "size_of(",
     "{", "}", "(", ")", "[", "]", ";", ":", ",", ".", "..",
     "=", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%",
-    "&", "&&", "|", "||", "^", "~", "<<", ">>", "+=", "\n", "0", "1", "\"a\"",
+    "&", "&&", "|", "||", "^", "~", "<<", ">>", "+=", "\n", "0", "1", "0x2a", "0b101", "'a'", "\"a\"",
 };
 
 static void fuzz_one(const unsigned char *data, size_t len, FILE *sink,
@@ -156,7 +156,7 @@ static void emit_expr(StrBuf *sb, int depth)
         "&", "|", "^", "<<", ">>", "&&", "||",
     };
     if (depth <= 0) {
-        switch (rng_range(5)) {
+        switch (rng_range(8)) {
         case 0:
             sb_append(sb, "%zu", rng_range(100));
             break;
@@ -171,6 +171,15 @@ static void emit_expr(StrBuf *sb, int depth)
             break;
         case 4:
             sb_append(sb, "true");
+            break;
+        case 5:
+            sb_append(sb, "0x%zx", rng_range(256));
+            break;
+        case 6:
+            sb_append(sb, "0b101");
+            break;
+        case 7:
+            sb_append(sb, "'a'");
             break;
         }
         return;

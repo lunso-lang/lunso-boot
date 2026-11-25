@@ -619,15 +619,7 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
 static bool integer_magnitude(const Ast *ast, AstNodeId id, uint64_t *number)
 {
     AstSpan span = node_span(ast, id);
-    *number = 0;
-    for (uint32_t i = 0; i < span.length; i++) {
-        unsigned digit = ast->source[span.offset + i] - '0';
-        if (*number > (UINT64_MAX - digit) / 10) {
-            return false;
-        }
-        *number = *number * 10 + digit;
-    }
-    return true;
+    return literal_integer_value(ast->source + span.offset, span.length, number);
 }
 
 static uint64_t integer_limit(TypeKind type, bool negative)
@@ -708,7 +700,11 @@ static SemaType integer_literal(Checker *checker, AstNodeId id, SemaType expecte
     }
     uint64_t number;
     if (!integer_magnitude(checker->ast, id, &number)) {
-        return fail(checker, id, "integer literal is out of range");
+        AstSpan span = node_span(checker->ast, id);
+        const char *msg = checker->ast->source[span.offset] == '\''
+                          ? "invalid character literal"
+                          : "integer literal is out of range";
+        return fail(checker, id, msg);
     }
     TypeKind kind = expected.kind;
     if (!is_integer(kind)) {

@@ -31,6 +31,7 @@ bool literal_next_byte(const unsigned char *text, uint32_t end, uint32_t *cursor
         case 't': value = '\t'; break;
         case '\\':
         case '"':
+        case '\'':
             value = escape;
             break;
         case 'x': {
@@ -52,5 +53,54 @@ bool literal_next_byte(const unsigned char *text, uint32_t end, uint32_t *cursor
     }
     *cursor = next;
     *byte = value;
+    return true;
+}
+
+bool literal_integer_value(const unsigned char *text, uint32_t length, uint64_t *value)
+{
+    if (length >= 2 && text[0] == '\'') {
+        if (text[length - 1] != '\'') {
+            return false;
+        }
+        uint32_t cursor = 1;
+        uint32_t end = length - 1;
+        if (cursor >= end) {
+            return false;
+        }
+        unsigned char byte = 0;
+        if (!literal_next_byte(text, end, &cursor, &byte) || cursor != end) {
+            return false;
+        }
+        *value = byte;
+        return true;
+    }
+
+    uint32_t start = 0;
+    unsigned base = 10;
+    if (length >= 2 && text[0] == '0') {
+        if (text[1] == 'x' || text[1] == 'X') {
+            base = 16;
+            start = 2;
+        } else if (text[1] == 'b' || text[1] == 'B') {
+            base = 2;
+            start = 2;
+        }
+    }
+    if (start >= length) {
+        return false;
+    }
+
+    uint64_t acc = 0;
+    for (uint32_t i = start; i < length; i++) {
+        int digit = hex_digit(text[i]);
+        if (digit < 0 || (unsigned)digit >= base) {
+            return false;
+        }
+        if (acc > (UINT64_MAX - (unsigned)digit) / base) {
+            return false;
+        }
+        acc = acc * base + (unsigned)digit;
+    }
+    *value = acc;
     return true;
 }

@@ -97,6 +97,16 @@ static TokenKind scan_identifier(Lexer *lexer, size_t start)
     return TOKEN_IDENTIFIER;
 }
 
+static bool is_hex_digit(unsigned char byte)
+{
+    return is_digit(byte) || (byte >= 'a' && byte <= 'f') || (byte >= 'A' && byte <= 'F');
+}
+
+static bool is_binary_digit(unsigned char byte)
+{
+    return byte == '0' || byte == '1';
+}
+
 static void scan_digits(Lexer *lexer)
 {
     while (is_digit(peek(lexer))) {
@@ -104,8 +114,27 @@ static void scan_digits(Lexer *lexer)
     }
 }
 
-static TokenKind scan_number(Lexer *lexer)
+static TokenKind scan_number(Lexer *lexer, unsigned char first)
 {
+    if (first == '0' && (match(lexer, 'x') || match(lexer, 'X'))) {
+        if (!is_hex_digit(peek(lexer))) {
+            return TOKEN_INVALID_NUMBER;
+        }
+        while (is_hex_digit(peek(lexer))) {
+            advance(lexer);
+        }
+        return TOKEN_INTEGER;
+    }
+    if (first == '0' && (match(lexer, 'b') || match(lexer, 'B'))) {
+        if (!is_binary_digit(peek(lexer))) {
+            return TOKEN_INVALID_NUMBER;
+        }
+        while (is_binary_digit(peek(lexer))) {
+            advance(lexer);
+        }
+        return TOKEN_INTEGER;
+    }
+
     scan_digits(lexer);
     TokenKind kind = TOKEN_INTEGER;
     if (peek(lexer) == '.' && lexer->length - lexer->offset >= 2 &&
@@ -128,18 +157,19 @@ static TokenKind scan_number(Lexer *lexer)
     return kind;
 }
 
-static TokenKind scan_string(Lexer *lexer)
+static TokenKind scan_quoted(Lexer *lexer, unsigned char quote,
+                             TokenKind ok, TokenKind unterminated)
 {
     while (lexer->offset < lexer->length && !is_newline(peek(lexer))) {
         unsigned char byte = advance(lexer);
-        if (byte == '"') {
-            return TOKEN_STRING;
+        if (byte == quote) {
+            return ok;
         }
         if (byte == '\\' && lexer->offset < lexer->length && !is_newline(peek(lexer))) {
             advance(lexer);
         }
     }
-    return TOKEN_UNTERMINATED_STRING;
+    return unterminated;
 }
 
 static TokenKind scan_slash(Lexer *lexer)
@@ -233,7 +263,9 @@ static TokenKind scan_token(Lexer *lexer)
     case '~':
         return TOKEN_TILDE;
     case '"':
-        return scan_string(lexer);
+        return scan_quoted(lexer, '"', TOKEN_STRING, TOKEN_UNTERMINATED_STRING);
+    case '\'':
+        return scan_quoted(lexer, '\'', TOKEN_CHAR, TOKEN_UNTERMINATED_CHAR);
     case '\r':
     case '\n':
         finish_newline(lexer, byte);
@@ -246,7 +278,7 @@ static TokenKind scan_token(Lexer *lexer)
         return scan_identifier(lexer, start);
     }
     if (is_digit(byte)) {
-        return scan_number(lexer);
+        return scan_number(lexer, byte);
     }
     return TOKEN_INVALID;
 }
@@ -272,9 +304,11 @@ const char *lexer_error_message(TokenKind kind)
     case TOKEN_INVALID:
         return "unexpected byte";
     case TOKEN_INVALID_NUMBER:
-        return "invalid exponent in number";
+        return "invalid number literal";
     case TOKEN_UNTERMINATED_STRING:
         return "unterminated string";
+    case TOKEN_UNTERMINATED_CHAR:
+        return "unterminated character literal";
     case TOKEN_UNTERMINATED_COMMENT:
         return "unterminated block comment";
     default:

@@ -76,6 +76,7 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         [TOKEN_INTEGER] = "INTEGER",
         [TOKEN_FLOAT] = "FLOAT",
         [TOKEN_STRING] = "STRING",
+        [TOKEN_CHAR] = "CHAR",
         [TOKEN_COMMENT] = "COMMENT",
         [TOKEN_LEFT_PAREN] = "LEFT_PAREN",
         [TOKEN_RIGHT_PAREN] = "RIGHT_PAREN",
@@ -137,6 +138,7 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         case TOKEN_INTEGER:
         case TOKEN_FLOAT:
         case TOKEN_STRING:
+        case TOKEN_CHAR:
         case TOKEN_COMMENT:
             putchar(' ');
             print_lexeme(source + token.offset, token.length);

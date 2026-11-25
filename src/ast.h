@@ -42,6 +42,7 @@ enum {
     AST_SLICE,       // a: base node, b: range node
     AST_SLICE_RANGE, // a: start expression, b: end expression
     AST_MEMBER,      // a: base node, b: member name length
+    AST_CAST,        // a: operand node, b: destination type node
 
     // Unary operators store the operand node in a.
     AST_POSITIVE,

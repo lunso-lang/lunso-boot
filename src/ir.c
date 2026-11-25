@@ -287,6 +287,11 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         return emit_value(lowering, IR_BYTES, info.type, ast->positions[id], data.a, 0);
     case AST_CALL:
         return lower_call(lowering, id);
+    case AST_CAST: {
+        uint32_t source = lower_expression(lowering, data.a);
+        return emit_value(lowering, IR_INT_CAST, info.type, source,
+                          lowering->sema->nodes[data.a].type.kind, 0);
+    }
     case AST_INDEX:
     case AST_MEMBER: {
         uint32_t address = lower_memory_address(lowering, id);

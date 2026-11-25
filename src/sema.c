@@ -677,6 +677,31 @@ static SemaType check_member(Checker *checker, AstNodeId id)
     return fail(checker, id, "unknown struct field");
 }
 
+static SemaType check_cast(Checker *checker, AstNodeId id)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    SemaType target = resolve_type(checker, node.b);
+    if (!is_integer(target.kind)) {
+        return fail(checker, node.b, "cast destination must be an integer type");
+    }
+
+    // A literal in a cast can use the full integer range before conversion.
+    SemaType source_hint = no_type;
+    AstKind operand = ast->kinds[node.a];
+    if (operand == AST_INTEGER ||
+        (operand == AST_POSITIVE && ast->kinds[ast->data[node.a].a] == AST_INTEGER)) {
+        source_hint.kind = TYPE_U64;
+    } else if (operand == AST_NEGATE && ast->kinds[ast->data[node.a].a] == AST_INTEGER) {
+        source_hint.kind = TYPE_I64;
+    }
+    SemaType source = value(checker, node.a, source_hint);
+    if (!is_integer(source.kind)) {
+        return fail(checker, node.a, "cast operand must be an integer");
+    }
+    return target;
+}
+
 static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expected)
 {
     const Ast *ast = checker->ast;
@@ -713,6 +738,8 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
     }
     case AST_MEMBER:
         return check_member(checker, id);
+    case AST_CAST:
+        return check_cast(checker, id);
     case AST_POSITIVE:
     case AST_NEGATE:
     case AST_LOGICAL_NOT:

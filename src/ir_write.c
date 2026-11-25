@@ -139,6 +139,12 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         fputc(' ', output);
         write_value(output, instruction.a);
         break;
+    case IR_INT_CAST:
+        fputs("cast.", output);
+        write_type(output, module, instruction.type);
+        fprintf(output, " %s ", sema_type_name(instruction.b));
+        write_value(output, instruction.a);
+        break;
     case IR_FIELD_ADDRESS:
         fputs("field_address.", output);
         write_type(output, module, instruction.type);

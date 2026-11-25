@@ -25,6 +25,7 @@ enum {
     PREC_SHIFT,
     PREC_SUM,
     PREC_PRODUCT,
+    PREC_CAST,
     PREC_PREFIX,
     MAX_RECURSION_DEPTH = 256,
 };
@@ -68,6 +69,7 @@ static const Infix infix_operators[] = {
 
 static AstNodeId parse_expression(Parser *parser, unsigned minimum);
 static AstNodeId parse_block(Parser *parser);
+static AstNodeId parse_type(Parser *parser);
 
 static bool failed(const Parser *parser)
 {
@@ -309,9 +311,17 @@ static AstNodeId parse_expression(Parser *parser, unsigned minimum)
     }
 
     AstNodeId left = parse_operand(parser);
-    while (!failed(parser) &&
-           (size_t)parser->current.kind < sizeof(infix_operators) / sizeof(infix_operators[0])) {
+    while (!failed(parser)) {
         Token token = parser->current;
+        if (token.kind == TOKEN_AS && minimum <= PREC_CAST) {
+            advance(parser);
+            AstNodeId type = parse_type(parser);
+            left = add_node(parser, AST_CAST, token, left, type);
+            continue;
+        }
+        if ((size_t)token.kind >= sizeof(infix_operators) / sizeof(infix_operators[0])) {
+            break;
+        }
         Infix infix = infix_operators[token.kind];
         if (infix.precedence < minimum) {
             break;

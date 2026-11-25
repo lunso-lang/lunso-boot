@@ -261,6 +261,17 @@ static void write_operation(FILE *out, IrInstruction inst)
     }
 }
 
+static void write_integer_cast(FILE *out, uint32_t result, uint32_t value,
+                               TypeKind source, TypeKind destination)
+{
+    QbeType target = types[destination];
+    const char *op = target.extend ? target.extend : "copy";
+    if (target.base == 'l' && types[source].base == 'w') {
+        op = is_signed(source) ? "extsw" : "extuw";
+    }
+    fprintf(out, "\t%%v%" PRIu32 " =%c %s %%v%" PRIu32 "\n", result, target.base, op, value);
+}
+
 static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
 {
     IrInstruction inst = module->instructions[index];
@@ -303,8 +314,10 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
         write_storage_init(out, inst, index);
         break;
     case IR_WIDEN_INDEX:
-        fprintf(out, "\t%%v%" PRIu32 " =l %s %%v%" PRIu32 "\n", inst.result,
-                is_signed(inst.type.kind) ? "extsw" : "extuw", inst.a);
+        write_integer_cast(out, inst.result, inst.a, inst.type.kind, TYPE_U64);
+        break;
+    case IR_INT_CAST:
+        write_integer_cast(out, inst.result, inst.a, inst.b, inst.type.kind);
         break;
     case IR_ELEMENT_ADDRESS:
     case IR_SLICE:

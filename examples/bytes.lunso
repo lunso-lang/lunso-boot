@@ -1,8 +1,8 @@
 ext fun putchar(character: i32): i32
 
 fun print_bytes(text: []u8) {
-    for var i: i64 = 0; i < len(text); i += 1 {
-        putchar(text[i] as i32)
+    for var i = 0; i < len(text); i += 1 {
+        putchar(text[i])
     }
 }
 

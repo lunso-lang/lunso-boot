@@ -356,6 +356,9 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
     case IR_INT_CAST:
         write_integer_cast(out, inst.result, inst.a, inst.b, inst.type.kind);
         break;
+    case IR_FLOAT_EXTEND:
+        fprintf(out, "\t%%v%" PRIu32 " =d exts %%v%" PRIu32 "\n", inst.result, inst.a);
+        break;
     case IR_ELEMENT_ADDRESS:
     case IR_SLICE:
         write_access(out, inst);

@@ -126,6 +126,38 @@ static bool is_numeric(TypeKind type)
     return is_integer(type) || is_float(type);
 }
 
+static bool can_promote(TypeKind source, TypeKind target)
+{
+    if (source == TYPE_F32 && target == TYPE_F64) {
+        return true;
+    }
+    if (!is_integer(source) || !is_integer(target)) {
+        return false;
+    }
+    uint32_t from = sema_scalar_size(source);
+    uint32_t to = sema_scalar_size(target);
+    return from < to && (!is_signed(source) || is_signed(target));
+}
+
+static TypeKind common_numeric_type(TypeKind left, TypeKind right)
+{
+    if (left == right || can_promote(right, left)) {
+        return left;
+    }
+    if (can_promote(left, right)) {
+        return right;
+    }
+    if (is_integer(left) && is_integer(right)) {
+        for (TypeKind kind = TYPE_I8; kind <= TYPE_I64; kind++) {
+            if ((left == kind || can_promote(left, kind)) &&
+                (right == kind || can_promote(right, kind))) {
+                return kind;
+            }
+        }
+    }
+    return TYPE_INVALID;
+}
+
 static bool same_type(SemaType a, SemaType b)
 {
     return a.kind == b.kind && a.length == b.length && a.element == b.element &&
@@ -480,14 +512,31 @@ static void bind_local(Checker *checker, AstNodeId id, AstSpan name, SemaType ty
 static SemaType check_expr(Checker *checker, AstNodeId id, SemaType expected);
 static bool check_statement(Checker *checker, AstNodeId id);
 
-static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
+static SemaType check_value(Checker *checker, AstNodeId id, SemaType hint)
 {
-    SemaType type = check_expr(checker, id, expected);
+    SemaType type = check_expr(checker, id, hint);
     if (failed(checker)) {
         return no_type;
     }
     if (type.kind == TYPE_VOID) {
         return fail(checker, id, "a value is required here");
+    }
+    return type;
+}
+
+static void promote(Checker *checker, AstNodeId id, TypeKind target)
+{
+    SemaNode *node = &checker->sema->nodes[id];
+    if (node->type.kind != target) {
+        node->promotion = target;
+    }
+}
+
+static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
+{
+    SemaType type = check_value(checker, id, expected);
+    if (failed(checker)) {
+        return no_type;
     }
     if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE &&
         type.element == expected.element && type.record == expected.record &&
@@ -499,35 +548,60 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
         type.pointee == expected.pointee && expected.read_only) {
         return expected;
     }
+    if (can_promote(type.kind, expected.kind)) {
+        promote(checker, id, expected.kind);
+        return expected;
+    }
     if (expected.kind != TYPE_INVALID && !same_type(type, expected)) {
         return fail(checker, id, "type mismatch");
     }
     return type;
 }
 
-static SemaType integer_literal(Checker *checker, AstNodeId id, SemaType expected, bool negative)
+static bool integer_magnitude(const Ast *ast, AstNodeId id, uint64_t *number)
 {
-    const Ast *ast = checker->ast;
-    SemaType type = is_integer(expected.kind) ? expected : (SemaType){.kind = TYPE_I32};
-    if (negative && !is_signed(type.kind)) {
-        return fail(checker, id, "unary '-' requires a signed number");
-    }
-    unsigned width_index = (unsigned)(type.kind - (is_signed(type.kind) ? TYPE_I8 : TYPE_U8));
-    unsigned bits = 8u << width_index;
-    uint64_t limit = UINT64_MAX >> (64 - bits);
-    if (is_signed(type.kind)) {
-        limit = (limit >> 1) + negative;
-    }
     AstSpan span = node_span(ast, id);
-    uint64_t number = 0;
+    *number = 0;
     for (uint32_t i = 0; i < span.length; i++) {
         unsigned digit = ast->source[span.offset + i] - '0';
-        if (number > (limit - digit) / 10) {
-            return fail(checker, id, "integer literal is out of range");
+        if (*number > (UINT64_MAX - digit) / 10) {
+            return false;
         }
-        number = number * 10 + digit;
+        *number = *number * 10 + digit;
     }
-    return type;
+    return true;
+}
+
+static bool integer_fits(TypeKind type, uint64_t number, bool negative)
+{
+    if (negative && !is_signed(type)) {
+        return false;
+    }
+    uint32_t bits = 8 * sema_scalar_size(type);
+    uint64_t limit = UINT64_MAX >> (64 - bits);
+    if (is_signed(type)) {
+        limit = (limit >> 1) + negative;
+    }
+    return number <= limit;
+}
+
+static SemaType integer_literal(Checker *checker, AstNodeId id, SemaType expected, bool negative)
+{
+    if (negative && is_integer(expected.kind) && !is_signed(expected.kind)) {
+        return fail(checker, id, "unary '-' requires a signed number");
+    }
+    uint64_t number;
+    if (!integer_magnitude(checker->ast, id, &number)) {
+        return fail(checker, id, "integer literal is out of range");
+    }
+    TypeKind kind = expected.kind;
+    if (!is_integer(kind)) {
+        kind = integer_fits(TYPE_I32, number, negative) ? TYPE_I32 : TYPE_I64;
+    }
+    if (!integer_fits(kind, number, negative)) {
+        return fail(checker, id, "integer literal is out of range");
+    }
+    return (SemaType){.kind = kind};
 }
 
 static SemaType float_literal(Checker *checker, AstNodeId id, SemaType expected)
@@ -677,12 +751,57 @@ static bool integer_operator(AstKind kind)
            (kind >= AST_ASSIGN_REMAINDER && kind <= AST_ASSIGN_SHIFT_RIGHT);
 }
 
-static bool literal_like(const Ast *ast, AstNodeId id)
+static bool is_shift(AstKind kind)
 {
-    while (ast->kinds[id] == AST_POSITIVE || ast->kinds[id] == AST_NEGATE) {
-        id = ast->data[id].a;
+    return kind == AST_SHIFT_LEFT || kind == AST_SHIFT_RIGHT ||
+           kind == AST_ASSIGN_SHIFT_LEFT || kind == AST_ASSIGN_SHIFT_RIGHT;
+}
+
+// A numeric expression built from literals can take its type from its context.
+static bool literal_expression(const Ast *ast, AstNodeId id, TypeKind hint,
+                               unsigned depth, bool negative)
+{
+    if (depth == MAX_ANALYSIS_DEPTH) {
+        return false;
     }
-    return ast->kinds[id] == AST_INTEGER || ast->kinds[id] == AST_FLOAT;
+    AstKind kind = ast->kinds[id];
+    AstNodeData node = ast->data[id];
+    if (kind == AST_INTEGER) {
+        uint64_t number;
+        return hint == TYPE_INVALID ||
+               (is_integer(hint) && integer_magnitude(ast, id, &number) &&
+                integer_fits(hint, number, negative));
+    }
+    if (kind == AST_FLOAT) {
+        return hint == TYPE_INVALID || is_float(hint);
+    }
+    if (kind == AST_POSITIVE || kind == AST_NEGATE || kind == AST_BIT_NOT) {
+        if (kind == AST_NEGATE && is_integer(hint) && !is_signed(hint)) {
+            return false;
+        }
+        return literal_expression(ast, node.a, hint, depth + 1, kind == AST_NEGATE);
+    }
+    if ((kind >= AST_ADD && kind <= AST_REMAINDER) ||
+        (kind >= AST_BIT_AND && kind <= AST_SHIFT_RIGHT)) {
+        return literal_expression(ast, node.a, hint, depth + 1, false) &&
+               literal_expression(ast, node.b, hint, depth + 1, false);
+    }
+    return false;
+}
+
+static SemaType literal_hint(const Ast *ast, AstNodeId id, SemaType peer)
+{
+    return is_numeric(peer.kind) && literal_expression(ast, id, peer.kind, 0, false)
+           ? peer : no_type;
+}
+
+static SemaType binary_literal_hint(const Ast *ast, AstNodeId id, SemaType peer, SemaType context)
+{
+    SemaType hint = literal_hint(ast, id, peer);
+    if (hint.kind == TYPE_INVALID && can_promote(peer.kind, context.kind)) {
+        return literal_hint(ast, id, context);
+    }
+    return hint;
 }
 
 typedef enum { NO_ADDRESS, READ_ONLY_ADDRESS, WRITABLE_ADDRESS } AddressAccess;
@@ -721,20 +840,18 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         return bool_type;
     }
     AstKind target = ast->kinds[node.a];
-    if (is_assignment(kind) && target != AST_INDEX && target != AST_MEMBER && target != AST_DEREFERENCE &&
+    bool assignment = is_assignment(kind);
+    bool shift = is_shift(kind);
+    if (assignment && target != AST_INDEX && target != AST_MEMBER && target != AST_DEREFERENCE &&
         (target != AST_IDENTIFIER || boolean_name(ast, node_span(ast, node.a)))) {
         return fail(checker, node.a, "assignment requires a local variable, array element, or field");
     }
     SemaType context = !is_comparison(kind) && is_numeric(expected.kind) ? expected : no_type;
-    SemaType operand;
-    if (!is_assignment(kind) && context.kind == TYPE_INVALID && literal_like(ast, node.a) &&
-        !literal_like(ast, node.b)) {
-        operand = value(checker, node.b, no_type);
-        value(checker, node.a, operand);
-    } else {
-        operand = value(checker, node.a, context);
-        if (is_assignment(kind) && !failed(checker) &&
-            address_access(checker, node.a) != WRITABLE_ADDRESS) {
+    SemaType left;
+    SemaType right;
+    if (assignment || shift) {
+        left = check_value(checker, node.a, assignment ? no_type : context);
+        if (assignment && !failed(checker) && address_access(checker, node.a) != WRITABLE_ADDRESS) {
             if (target == AST_DEREFERENCE) {
                 return fail(checker, node.a, "cannot write through a read-only pointer");
             }
@@ -742,29 +859,54 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
                         ? "index assignment requires a local fixed array"
                         : "field assignment requires a local struct or fixed array element");
         }
-        if ((kind == AST_EQUAL || kind == AST_NOT_EQUAL) && operand.kind == TYPE_POINTER) {
-            SemaType right = value(checker, node.b, no_type);
-            if (right.kind != TYPE_POINTER || right.pointee != operand.pointee) {
-                return fail(checker, node.b, "type mismatch");
-            }
+        if (shift) {
+            SemaType hint = literal_hint(ast, node.b, left);
+            right = check_value(checker, node.b, hint);
         } else {
-            value(checker, node.b, operand);
+            right = value(checker, node.b, left);
+        }
+    } else {
+        bool left_literal = literal_expression(ast, node.a, TYPE_INVALID, 0, false);
+        bool right_literal = literal_expression(ast, node.b, TYPE_INVALID, 0, false);
+        if (left_literal && !right_literal) {
+            right = check_value(checker, node.b, context);
+            left = check_value(checker, node.a, binary_literal_hint(ast, node.a, right, context));
+        } else {
+            left = check_value(checker, node.a, context);
+            right = check_value(checker, node.b, right_literal && !left_literal
+                                ? binary_literal_hint(ast, node.b, left, context) : context);
         }
     }
     if (failed(checker)) {
         return no_type;
     }
     if (kind == AST_ASSIGN) {
-        return operand;
+        return left;
     }
-    if ((kind == AST_EQUAL || kind == AST_NOT_EQUAL) &&
-        (operand.kind == TYPE_BOOL || operand.kind == TYPE_POINTER)) {
-        return bool_type;
+    if (kind == AST_EQUAL || kind == AST_NOT_EQUAL) {
+        if ((left.kind == TYPE_BOOL && right.kind == TYPE_BOOL) ||
+            (left.kind == TYPE_POINTER && right.kind == TYPE_POINTER && left.pointee == right.pointee)) {
+            return bool_type;
+        }
     }
-    if (integer_operator(kind) ? !is_integer(operand.kind) : !is_numeric(operand.kind)) {
+    if (shift && !is_integer(right.kind)) {
+        return fail(checker, node.b, "shift count must be an integer");
+    }
+    if (!assignment && !shift && is_numeric(left.kind) && is_numeric(right.kind)) {
+        TypeKind common = common_numeric_type(left.kind, right.kind);
+        if (common == TYPE_INVALID) {
+            return fail(checker, id, "numeric operands have no common type");
+        }
+        promote(checker, node.a, common);
+        promote(checker, node.b, common);
+        left.kind = common;
+    }
+    bool valid = integer_operator(kind) ? is_integer(left.kind) && is_integer(right.kind)
+                                         : is_numeric(left.kind) && is_numeric(right.kind);
+    if (!valid) {
         return fail(checker, id, "operator requires numeric operands of a supported type");
     }
-    return is_comparison(kind) ? bool_type : operand;
+    return is_comparison(kind) ? bool_type : left;
 }
 
 static SemaType check_unary(Checker *checker, AstNodeId id, SemaType expected)
@@ -780,7 +922,7 @@ static SemaType check_unary(Checker *checker, AstNodeId id, SemaType expected)
         checker->sema->nodes[child].type = type;
         return type;
     }
-    SemaType type = value(checker, child, is_numeric(expected.kind) ? expected : no_type);
+    SemaType type = check_value(checker, child, is_numeric(expected.kind) ? expected : no_type);
     if (failed(checker)) {
         return no_type;
     }
@@ -921,9 +1063,9 @@ static void check_variable(Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
     AstVariable variable = ast->variables[ast->data[id].a];
-    SemaType type = resolve_type(checker, variable.type);
+    SemaType type = variable.type ? resolve_type(checker, variable.type) : no_type;
     if (variable.initializer) {
-        value(checker, variable.initializer, type);
+        type = value(checker, variable.initializer, type);
     }
     bind_local(checker, id, (AstSpan){ast->positions[id], variable.name_length}, type);
 }

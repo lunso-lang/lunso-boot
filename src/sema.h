@@ -27,6 +27,7 @@ typedef struct {
     SemaType type;
     uint32_t binding;  // Local slot, function index on AST_CALL, or field byte offset.
     SemaBuiltin builtin;
+    TypeKind promotion;  // Numeric destination, or TYPE_INVALID for the original type.
     bool is_boolean_literal;
     bool borrow_array;  // The expression's fixed array is used as a full slice.
     bool falls_through;

@@ -177,6 +177,10 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         fprintf(output, " %s ", sema_type_name(instruction.b));
         write_value(output, instruction.a);
         break;
+    case IR_FLOAT_EXTEND:
+        fputs("extend.f64 ", output);
+        write_value(output, instruction.a);
+        break;
     case IR_FIELD_ADDRESS:
         fputs("field_address.", output);
         write_type(output, module, instruction.type);

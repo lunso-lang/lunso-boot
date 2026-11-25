@@ -440,10 +440,14 @@ static AstNodeId parse_variable(Parser *parser)
 {
     advance(parser);
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a variable name after 'var'");
-    expect(parser, TOKEN_COLON, "expected ':' after variable name");
-    AstVariable variable = {.name_length = (uint32_t)name.length, .type = parse_type(parser)};
+    AstVariable variable = {.name_length = (uint32_t)name.length};
+    if (match(parser, TOKEN_COLON)) {
+        variable.type = parse_type(parser);
+    }
     if (match(parser, TOKEN_EQUAL)) {
         variable.initializer = parse_expression(parser, PREC_ASSIGNMENT);
+    } else if (!variable.type) {
+        fail(parser, "expected ':' or '=' after variable name");
     }
 
     uint32_t index = 0;

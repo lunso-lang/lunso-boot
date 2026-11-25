@@ -263,7 +263,11 @@ static uint32_t lower_binary(Lowering *lowering, AstNodeId id)
     uint32_t left = lower_expression(lowering, data.a);
     uint32_t right = lower_expression(lowering, data.b);
     // Comparison results are bool. The instruction still needs the operand type.
-    SemaType operand = lowering->sema->nodes[data.a].type;
+    SemaNode left_info = lowering->sema->nodes[data.a];
+    SemaType operand = left_info.type;
+    if (left_info.promotion != TYPE_INVALID) {
+        operand.kind = left_info.promotion;
+    }
     return emit_value(lowering, binary_ops[kind], operand, left, right, 0);
 }
 
@@ -345,6 +349,11 @@ static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
     SemaNode info = lowering->sema->nodes[id];
     if (info.borrow_array) {
         return emit_value(lowering, IR_ARRAY_VIEW, info.type, value, 0, 0);
+    }
+    if (info.promotion != TYPE_INVALID) {
+        IrOp op = info.promotion == TYPE_F64 ? IR_FLOAT_EXTEND : IR_INT_CAST;
+        return emit_value(lowering, op, (SemaType){.kind = info.promotion},
+                          value, info.type.kind, 0);
     }
     return value;
 }

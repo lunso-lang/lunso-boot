@@ -10,6 +10,33 @@ Set `QBE` or `CC` to select a different executable.
 ./build/libc-demo
 ```
 
+## Local variables and numeric promotion
+
+`var name = expression` infers a local's type from its initializer. Untyped
+integer literals default to `i32` or `i64` according to their range, and untyped
+decimal literals default to `f64`. A string literal still has type `[N]u8`.
+
+```lunso
+fun widen(value: u32): i64 {
+    return value
+}
+
+fun total(value: u32, adjustment: i32): i64 {
+    var sum = value + adjustment
+    return sum
+}
+```
+
+Initializers, assignments, arguments, and returns allow implicit widening when
+the destination can represent every value of the source type. Arithmetic and
+comparisons use a common type for both operands. For example, `u32 + i32`
+uses `i64`, and `f32` promotes to `f64`. Shifts keep the type of the left
+operand and accept any integer type as the count. Integer and floating-point
+types stay separate. Use an explicit cast such as `value as i32` for integer
+conversions that can lose values.
+
+## Modules and I/O
+
 Project module names are relative to the entry file's directory. When a standard
 library directory is available, `import std.io` loads `io.lunso` from that
 directory and binds `io`. `import std` binds the root namespace, so its I/O

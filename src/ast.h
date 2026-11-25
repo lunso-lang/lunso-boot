@@ -159,7 +159,7 @@ typedef struct {
 typedef struct {
     uint32_t name_length;
     AstNodeId type;
-    AstNodeId initializer;  // AST_NODE_NONE if absent.
+    AstNodeId initializer;  // AST_NODE_NONE if absent, required without a type.
 } AstVariable;
 
 typedef struct {

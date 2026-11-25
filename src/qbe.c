@@ -110,20 +110,32 @@ static bool write_data(FILE *out, const IrModule *module)
     return true;
 }
 
+static bool uses_sret(TypeKind kind)
+{
+    return kind == TYPE_STRUCT || kind == TYPE_ARRAY || kind == TYPE_SLICE;
+}
+
+static void write_load(FILE *out, TypeKind kind, uint32_t result, const char *name, uint32_t address);
+
 static void write_call(FILE *out, const IrModule *module, IrInstruction inst)
 {
     IrFunction callee = module->functions[inst.a];
     QbeType result = types[callee.result.kind];
+    bool sret = uses_sret(callee.result.kind);
     fputc('\t', out);
-    if (inst.result) {
+    if (inst.result && !sret) {
         fprintf(out, "%%%s%" PRIu32 " =%s ", result.extend ? "raw" : "v", inst.result,
                 result.abi);
     }
     fputs("call ", out);
     write_symbol(out, module, inst.a);
     fputc('(', out);
+    if (sret) {
+        fprintf(out, "l %%%s%" PRIu32,
+                callee.result.kind == TYPE_SLICE ? "retbuf" : "v", inst.result);
+    }
     for (uint32_t i = 0; i < inst.c; i++) {
-        if (i != 0) {
+        if (sret || i != 0) {
             fputs(", ", out);
         }
         SemaType type = module->parameters[callee.first_parameter + i];
@@ -135,7 +147,9 @@ static void write_call(FILE *out, const IrModule *module, IrInstruction inst)
         }
     }
     fputs(")\n", out);
-    if (result.extend) {
+    if (callee.result.kind == TYPE_SLICE) {
+        write_load(out, TYPE_SLICE, inst.result, "retbuf", inst.result);
+    } else if (!sret && result.extend) {
         fprintf(out, "\t%%v%" PRIu32 " =w %s %%raw%" PRIu32 "\n",
                 inst.result, result.extend, inst.result);
     }
@@ -189,17 +203,22 @@ static void write_access(FILE *out, IrInstruction inst)
     }
 }
 
-static void write_storage_init(FILE *out, IrInstruction inst, uint32_t at)
+static void write_copy_bytes(FILE *out, const char *dst_reg, uint32_t dst_id, bool has_dst_id,
+                             uint32_t src_id, bool has_src, uint32_t bytes, uint32_t at)
 {
-    uint32_t bytes = sema_storage_size(inst.type);
     if (!bytes) {
         return;
     }
     fprintf(out, "\t%%i%" PRIu32 " =l copy 0\n\tjmp @init%" PRIu32 "\n@init%" PRIu32 "\n",
             at, at, at);
-    fprintf(out, "\t%%dst%" PRIu32 " =l add %%v%" PRIu32 ", %%i%" PRIu32 "\n", at, inst.a, at);
-    if (inst.b) {
-        fprintf(out, "\t%%src%" PRIu32 " =l add %%v%" PRIu32 ", %%i%" PRIu32 "\n", at, inst.b, at);
+    if (has_dst_id) {
+        fprintf(out, "\t%%dst%" PRIu32 " =l add %%%s%" PRIu32 ", %%i%" PRIu32 "\n",
+                at, dst_reg, dst_id, at);
+    } else {
+        fprintf(out, "\t%%dst%" PRIu32 " =l add %%%s, %%i%" PRIu32 "\n", at, dst_reg, at);
+    }
+    if (has_src) {
+        fprintf(out, "\t%%src%" PRIu32 " =l add %%v%" PRIu32 ", %%i%" PRIu32 "\n", at, src_id, at);
         fprintf(out, "\t%%byte%" PRIu32 " =w loadub %%src%" PRIu32 "\n", at, at);
         fprintf(out, "\tstoreb %%byte%" PRIu32 ", %%dst%" PRIu32 "\n", at, at);
     } else {
@@ -209,6 +228,11 @@ static void write_storage_init(FILE *out, IrInstruction inst, uint32_t at)
     fprintf(out, "\t%%more%" PRIu32 " =w cultl %%i%" PRIu32 ", %" PRIu32 "\n", at, at, bytes);
     fprintf(out, "\tjnz %%more%" PRIu32 ", @init%" PRIu32 ", @init_end%" PRIu32 "\n@init_end%" PRIu32 "\n",
             at, at, at, at);
+}
+
+static void write_storage_init(FILE *out, IrInstruction inst, uint32_t at)
+{
+    write_copy_bytes(out, "v", inst.a, true, inst.b, inst.b != 0, sema_storage_size(inst.type), at);
 }
 
 static char memory_suffix(TypeKind type)
@@ -339,7 +363,7 @@ static void write_cast(FILE *out, uint32_t result, uint32_t value,
 }
 
 static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
-                              const TypeKind *addressed)
+                              const TypeKind *addressed, SemaType result)
 {
     IrInstruction inst = module->instructions[index];
     switch (inst.op) {
@@ -455,11 +479,21 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
                 inst.a, inst.b, inst.c);
         break;
     case IR_RETURN:
-        fputs("\tret", out);
-        if (inst.a) {
-            fprintf(out, " %%v%" PRIu32, inst.a);
+        if (inst.a && result.kind == TYPE_SLICE) {
+            fprintf(out, "\tstorel %%v%" PRIu32 ", %%ret\n", inst.a);
+            fprintf(out, "\t%%ret_len%" PRIu32 " =l add %%ret, 8\n", index);
+            fprintf(out, "\tstorel %%len%" PRIu32 ", %%ret_len%" PRIu32 "\n", inst.a, index);
+            fputs("\tret\n", out);
+        } else if (inst.a && (result.kind == TYPE_STRUCT || result.kind == TYPE_ARRAY)) {
+            write_copy_bytes(out, "ret", 0, false, inst.a, true, sema_storage_size(result), index);
+            fputs("\tret\n", out);
+        } else {
+            fputs("\tret", out);
+            if (inst.a) {
+                fprintf(out, " %%v%" PRIu32, inst.a);
+            }
+            fputc('\n', out);
         }
-        fputc('\n', out);
         break;
     case IR_EQUAL:
     case IR_NOT_EQUAL:
@@ -502,13 +536,17 @@ static bool write_function(FILE *out, const IrModule *module, uint32_t index)
         return false;
     }
     fputs(entry_symbol(module, fn) ? "export function " : "function ", out);
-    if (fn.result.kind != TYPE_VOID) {
+    bool sret = uses_sret(fn.result.kind);
+    if (fn.result.kind != TYPE_VOID && !sret) {
         fprintf(out, "%s ", types[fn.result.kind].abi);
     }
     write_symbol(out, module, index);
     fputc('(', out);
+    if (sret) {
+        fputs("l %ret", out);
+    }
     for (uint32_t i = 0; i < fn.parameter_count; i++) {
-        if (i != 0) {
+        if (sret || i != 0) {
             fputs(", ", out);
         }
         SemaType parameter = module->parameters[fn.first_parameter + i];
@@ -522,7 +560,7 @@ static bool write_function(FILE *out, const IrModule *module, uint32_t index)
     bool has_bounds_check = false;
     for (uint32_t i = 0; i < fn.instruction_count; i++) {
         uint32_t index = fn.first_instruction + i;
-        write_instruction(out, module, index, addressed);
+        write_instruction(out, module, index, addressed, fn.result);
         IrOp op = module->instructions[index].op;
         has_bounds_check |= op == IR_ELEMENT_ADDRESS || op == IR_SLICE || op == IR_POINTER_SLICE;
         if (i == 0) {
@@ -556,6 +594,14 @@ static bool write_function(FILE *out, const IrModule *module, uint32_t index)
                     uint32_t size = sema_storage_size(inst.type);
                     fprintf(out, "\t%%v%" PRIu32 " =l %s %" PRIu32 "\n",
                             inst.result, size ? "alloc8" : "copy", size);
+                } else if (inst.op == IR_CALL && uses_sret(inst.type.kind)) {
+                    if (inst.type.kind == TYPE_SLICE) {
+                        fprintf(out, "\t%%retbuf%" PRIu32 " =l alloc8 16\n", inst.result);
+                    } else {
+                        uint32_t size = sema_storage_size(inst.type);
+                        fprintf(out, "\t%%v%" PRIu32 " =l %s %" PRIu32 "\n",
+                                inst.result, size ? "alloc8" : "copy", size);
+                    }
                 }
             }
         }

@@ -737,8 +737,8 @@ static bool register_functions(Checker *checker)
         *entry = i + 1;
         checker->sema->functions[i].result = resolve_type(checker, function.return_type);
         TypeKind result = checker->sema->functions[i].result.kind;
-        if (is_array_like(result) || result == TYPE_STRUCT) {
-            fail(checker, function.return_type, "function results must be scalar");
+        if (!function.body && (is_array_like(result) || result == TYPE_STRUCT)) {
+            fail(checker, function.return_type, "external results must be scalar");
         }
         for (uint32_t p = 0; p < function.parameters.count && !failed(checker); p++) {
             AstNodeId param = ast->children[function.parameters.first + p];

@@ -129,7 +129,7 @@ static bool is_numeric(TypeKind type)
 static bool same_type(SemaType a, SemaType b)
 {
     return a.kind == b.kind && a.length == b.length && a.element == b.element &&
-           a.record == b.record && a.pointee == b.pointee;
+           a.record == b.record && a.pointee == b.pointee && a.read_only == b.read_only;
 }
 
 static bool is_array_like(TypeKind type)
@@ -137,7 +137,14 @@ static bool is_array_like(TypeKind type)
     return type == TYPE_ARRAY || type == TYPE_SLICE;
 }
 
-static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee)
+static SemaType element_type(SemaType collection)
+{
+    return (SemaType){.kind = collection.element, .record = collection.record,
+                      .record_size = collection.record_size, .pointee = collection.pointee,
+                      .read_only = collection.read_only};
+}
+
+static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee, bool read_only)
 {
     if (failed(checker)) {
         return no_type;
@@ -145,10 +152,12 @@ static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee)
     if (is_array_like(pointee.kind)) {
         return fail(checker, id, "take the address of an array element instead");
     }
+    SemaType result = {.kind = TYPE_POINTER, .read_only = read_only};
     Sema *sema = checker->sema;
     for (uint32_t i = 0; i < sema->pointee_count; i++) {
         if (same_type(sema->pointees[i], pointee)) {
-            return (SemaType){.kind = TYPE_POINTER, .pointee = i};
+            result.pointee = i;
+            return result;
         }
     }
     if (sema->pointee_count == checker->pointee_capacity) {
@@ -170,7 +179,8 @@ static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee)
     }
     uint32_t index = sema->pointee_count++;
     sema->pointees[index] = pointee;
-    return (SemaType){.kind = TYPE_POINTER, .pointee = index};
+    result.pointee = index;
+    return result;
 }
 
 static AstSpan node_span(const Ast *ast, AstNodeId id)
@@ -293,7 +303,7 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     }
     if (ast_kind == AST_POINTER_TYPE) {
         SemaType pointee = resolve_type(checker, checker->ast->data[id].a);
-        return pointer_to(checker, id, pointee);
+        return pointer_to(checker, id, pointee, checker->ast->data[id].b != 0);
     }
     if (ast_kind == AST_ARRAY_TYPE) {
         AstNodeData data = checker->ast->data[id];
@@ -306,7 +316,7 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         }
         SemaType collection = {.kind = TYPE_SLICE, .element = element.kind,
                                .record = element.record, .record_size = element.record_size,
-                               .pointee = element.pointee};
+                               .pointee = element.pointee, .read_only = element.read_only};
         if (!data.b) {
             return collection;
         }
@@ -481,8 +491,12 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
     }
     if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE &&
         type.element == expected.element && type.record == expected.record &&
-        type.pointee == expected.pointee) {
+        type.pointee == expected.pointee && type.read_only == expected.read_only) {
         checker->sema->nodes[id].borrow_array = true;
+        return expected;
+    }
+    if (type.kind == TYPE_POINTER && expected.kind == TYPE_POINTER &&
+        type.pointee == expected.pointee && expected.read_only) {
         return expected;
     }
     if (expected.kind != TYPE_INVALID && !same_type(type, expected)) {
@@ -573,6 +587,25 @@ static SemaType check_identifier(Checker *checker, AstNodeId id)
     return local->type;
 }
 
+static SemaType check_collection_builtin(Checker *checker, AstNodeId id, SemaBuiltin builtin)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    bool length = builtin == BUILTIN_LEN;
+    if (node.b != 2) {
+        return fail(checker, id, length ? "len expects one array or slice argument"
+                                        : "data expects one array or slice argument");
+    }
+    SemaType operand = value(checker, ast->children[node.a + 1], no_type);
+    if (!is_array_like(operand.kind)) {
+        return fail(checker, id, length ? "len expects an array or slice"
+                                        : "data expects an array or slice");
+    }
+    checker->sema->nodes[id].builtin = builtin;
+    return length ? (SemaType){.kind = TYPE_I64}
+                  : pointer_to(checker, id, element_type(operand), true);
+}
+
 static SemaType check_call(Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
@@ -606,15 +639,10 @@ static SemaType check_call(Checker *checker, AstNodeId id)
         }
     }
     if (!entry && name_is(ast, name, "len")) {
-        if (node.b != 2) {
-            return fail(checker, id, "len expects one array or slice argument");
-        }
-        SemaType operand = value(checker, ast->children[node.a + 1], no_type);
-        if (!is_array_like(operand.kind)) {
-            return fail(checker, id, "len expects an array or slice");
-        }
-        checker->sema->nodes[id].is_builtin_len = true;
-        return (SemaType){.kind = TYPE_I64};
+        return check_collection_builtin(checker, id, BUILTIN_LEN);
+    }
+    if (!entry && name_is(ast, name, "data")) {
+        return check_collection_builtin(checker, id, BUILTIN_DATA);
     }
     if (!entry) {
         return fail(checker, callee, "unknown function");
@@ -657,18 +685,29 @@ static bool literal_like(const Ast *ast, AstNodeId id)
     return ast->kinds[id] == AST_INTEGER || ast->kinds[id] == AST_FLOAT;
 }
 
-static bool writable_target(const Checker *checker, AstNodeId id)
+typedef enum { NO_ADDRESS, READ_ONLY_ADDRESS, WRITABLE_ADDRESS } AddressAccess;
+
+static AddressAccess address_access(const Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
     while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
         AstNodeId base = ast->data[id].a;
-        if (ast->kinds[id] == AST_INDEX && checker->sema->nodes[base].type.kind != TYPE_ARRAY) {
-            return false;
+        if (ast->kinds[id] == AST_INDEX && checker->sema->nodes[base].type.kind == TYPE_SLICE) {
+            return READ_ONLY_ADDRESS;
         }
         id = base;
     }
-    return ast->kinds[id] == AST_DEREFERENCE ||
-           (ast->kinds[id] == AST_IDENTIFIER && !checker->sema->nodes[id].is_boolean_literal);
+    if (ast->kinds[id] == AST_DEREFERENCE) {
+        SemaType pointer = checker->sema->nodes[ast->data[id].a].type;
+        return pointer.read_only ? READ_ONLY_ADDRESS : WRITABLE_ADDRESS;
+    }
+    if (ast->kinds[id] == AST_STRING) {
+        return READ_ONLY_ADDRESS;
+    }
+    if (ast->kinds[id] == AST_IDENTIFIER && !checker->sema->nodes[id].is_boolean_literal) {
+        return WRITABLE_ADDRESS;
+    }
+    return NO_ADDRESS;
 }
 
 static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
@@ -694,12 +733,23 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         value(checker, node.a, operand);
     } else {
         operand = value(checker, node.a, context);
-        if (is_assignment(kind) && !failed(checker) && !writable_target(checker, node.a)) {
+        if (is_assignment(kind) && !failed(checker) &&
+            address_access(checker, node.a) != WRITABLE_ADDRESS) {
+            if (target == AST_DEREFERENCE) {
+                return fail(checker, node.a, "cannot write through a read-only pointer");
+            }
             return fail(checker, node.a, target == AST_INDEX
                         ? "index assignment requires a local fixed array"
                         : "field assignment requires a local struct or fixed array element");
         }
-        value(checker, node.b, operand);
+        if ((kind == AST_EQUAL || kind == AST_NOT_EQUAL) && operand.kind == TYPE_POINTER) {
+            SemaType right = value(checker, node.b, no_type);
+            if (right.kind != TYPE_POINTER || right.pointee != operand.pointee) {
+                return fail(checker, node.b, "type mismatch");
+            }
+        } else {
+            value(checker, node.b, operand);
+        }
     }
     if (failed(checker)) {
         return no_type;
@@ -810,8 +860,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (!is_array_like(base.kind) || !is_integer(index.kind)) {
             return fail(checker, id, "indexing requires an array or slice and an integer index");
         }
-        return (SemaType){.kind = base.element, .record = base.record, .record_size = base.record_size,
-                          .pointee = base.pointee};
+        return element_type(base);
     }
     case AST_SLICE: {
         SemaType base = value(checker, node.a, no_type);
@@ -822,7 +871,8 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
             return fail(checker, id, "slicing requires an array or slice and integer bounds");
         }
         return (SemaType){.kind = TYPE_SLICE, .element = base.element, .record = base.record,
-                          .record_size = base.record_size, .pointee = base.pointee};
+                          .record_size = base.record_size, .pointee = base.pointee,
+                          .read_only = base.read_only};
     }
     case AST_MEMBER:
         return check_member(checker, id);
@@ -833,10 +883,11 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (failed(checker)) {
             return no_type;
         }
-        if (!writable_target(checker, node.a)) {
-            return fail(checker, node.a, "address-of requires writable storage");
+        AddressAccess access = address_access(checker, node.a);
+        if (access == NO_ADDRESS) {
+            return fail(checker, node.a, "address-of requires an addressable value");
         }
-        return pointer_to(checker, id, operand);
+        return pointer_to(checker, id, operand, access == READ_ONLY_ADDRESS);
     }
     case AST_DEREFERENCE: {
         SemaType operand = value(checker, node.a, no_type);

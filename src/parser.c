@@ -408,8 +408,9 @@ static AstNodeId parse_type_inner(Parser *parser)
 {
     Token opening = parser->current;
     if (match(parser, TOKEN_STAR)) {
+        bool read_only = match(parser, TOKEN_CONST);
         AstNodeId pointee = parse_type(parser);
-        return add_node(parser, AST_POINTER_TYPE, opening, pointee, 0);
+        return add_node(parser, AST_POINTER_TYPE, opening, pointee, read_only);
     }
     if (opening.kind != TOKEN_LEFT_BRACKET) {
         return parse_type_name(parser);

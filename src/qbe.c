@@ -382,6 +382,9 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         write_length(out, inst.type, inst.a);
         fputc('\n', out);
         break;
+    case IR_DATA:
+        fprintf(out, "\t%%v%" PRIu32 " =l copy %%v%" PRIu32 "\n", inst.result, inst.a);
+        break;
     case IR_CALL:
         write_call(out, module, inst);
         break;

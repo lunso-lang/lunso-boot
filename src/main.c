@@ -60,6 +60,7 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         [TOKEN_EXT] = "EXT",
         [TOKEN_STRUCT] = "STRUCT",
         [TOKEN_AS] = "AS",
+        [TOKEN_CONST] = "CONST",
         [TOKEN_IMPORT] = "IMPORT",
         [TOKEN_PUB] = "PUB",
         [TOKEN_PRIV] = "PRIV",

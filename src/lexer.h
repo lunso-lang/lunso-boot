@@ -7,6 +7,7 @@ typedef enum {
     TOKEN_EXT,
     TOKEN_STRUCT,
     TOKEN_AS,
+    TOKEN_CONST,
     TOKEN_IMPORT,
     TOKEN_PUB,
     TOKEN_PRIV,

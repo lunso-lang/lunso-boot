@@ -29,7 +29,7 @@ enum {
     AST_TYPE_NAME,  // a: name length
     AST_QUALIFIED_TYPE, // a: first path component in children, b: component count
     AST_ARRAY_TYPE, // a: element type, b: length literal or AST_NODE_NONE for a slice
-    AST_POINTER_TYPE, // a: pointee type
+    AST_POINTER_TYPE, // a: pointee type, b: read-only qualifier
 
     AST_BLOCK,   // a: first item in children, b: item count
     AST_RETURN,  // a: value node or AST_NODE_NONE

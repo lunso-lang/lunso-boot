@@ -18,13 +18,16 @@ typedef struct {
     uint32_t record;       // Index in Ast.structs for a struct or a collection of one.
     uint32_t record_size;  // Size including alignment padding.
     uint32_t pointee;      // Index in Sema.pointees for a pointer or a collection of pointers.
+    bool read_only;        // The pointer (or a pointer element) gives read-only access.
 } SemaType;
+
+typedef enum { BUILTIN_NONE, BUILTIN_LEN, BUILTIN_DATA } SemaBuiltin;
 
 typedef struct {
     SemaType type;
     uint32_t binding;  // Local slot, function index on AST_CALL, or field byte offset.
+    SemaBuiltin builtin;
     bool is_boolean_literal;
-    bool is_builtin_len;
     bool borrow_array;  // The expression's fixed array is used as a full slice.
     bool falls_through;
 } SemaNode;

@@ -168,10 +168,11 @@ static uint32_t lower_call(Lowering *lowering, AstNodeId id)
     IrModule *module = lowering->module;
     SemaNode info = lowering->sema->nodes[id];
     AstNodeData call = ast->data[id];
-    if (info.is_builtin_len) {
+    if (info.builtin != BUILTIN_NONE) {
         AstNodeId argument = ast->children[call.a + 1];
         uint32_t value = lower_expression(lowering, argument);
-        return emit_value(lowering, IR_LEN, lowering->sema->nodes[argument].type, value, 0, 0);
+        IrOp op = info.builtin == BUILTIN_LEN ? IR_LEN : IR_DATA;
+        return emit_value(lowering, op, lowering->sema->nodes[argument].type, value, 0, 0);
     }
     uint32_t count = call.b - 1;
     uint32_t first = module->argument_count;

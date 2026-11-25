@@ -34,6 +34,9 @@ static void write_type(FILE *output, const IrModule *module, SemaType type)
     }
     while (kind == TYPE_POINTER) {
         fputc('*', output);
+        if (type.read_only) {
+            fputs("const ", output);
+        }
         type = module->pointees[type.pointee];
         kind = type.kind;
     }
@@ -157,9 +160,11 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         break;
     case IR_WIDEN_INDEX:
     case IR_LEN:
+    case IR_DATA:
     case IR_MEMORY_LOAD:
     case IR_ARRAY_VIEW:
         fputs(instruction.op == IR_LEN ? "len." :
+              instruction.op == IR_DATA ? "data." :
               instruction.op == IR_WIDEN_INDEX ? "widen_index." :
               instruction.op == IR_ARRAY_VIEW ? "array_view." : "load_memory.", output);
         write_type(output, module, instruction.type);

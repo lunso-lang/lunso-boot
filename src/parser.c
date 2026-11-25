@@ -228,8 +228,17 @@ static AstNodeId parse_postfix(Parser *parser, AstNodeId base)
         case TOKEN_LEFT_BRACKET: {
             open_group(parser);
             AstNodeId index = parse_expression(parser, PREC_ASSIGNMENT);
-            close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after index");
-            base = add_node(parser, AST_INDEX, token, base, index);
+            if (parser->current.kind == TOKEN_DOT_DOT && !failed(parser)) {
+                Token range = parser->current;
+                advance(parser);
+                AstNodeId end = parse_expression(parser, PREC_ASSIGNMENT);
+                close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after slice range");
+                AstNodeId bounds = add_node(parser, AST_SLICE_RANGE, range, index, end);
+                base = add_node(parser, AST_SLICE, token, base, bounds);
+            } else {
+                close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after index");
+                base = add_node(parser, AST_INDEX, token, base, index);
+            }
             break;
         }
         case TOKEN_DOT: {
@@ -360,10 +369,27 @@ static AstNodeId parse_if(Parser *parser)
     return add_node(parser, AST_IF, keyword, condition, index);
 }
 
-static AstNodeId parse_type(Parser *parser)
+static AstNodeId parse_type_name(Parser *parser)
 {
     Token type = expect(parser, TOKEN_IDENTIFIER, "expected a type name");
     return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
+}
+
+static AstNodeId parse_type(Parser *parser)
+{
+    Token opening = parser->current;
+    if (opening.kind != TOKEN_LEFT_BRACKET || failed(parser)) {
+        return parse_type_name(parser);
+    }
+    open_group(parser);
+    AstNodeId count = AST_NODE_NONE;
+    if (parser->current.kind != TOKEN_RIGHT_BRACKET) {
+        Token literal = expect(parser, TOKEN_INTEGER, "expected an integer array length or ']'");
+        count = add_node(parser, AST_INTEGER, literal, (uint32_t)literal.length, 0);
+    }
+    close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after array length");
+    AstNodeId element = parse_type_name(parser);
+    return add_node(parser, AST_ARRAY_TYPE, opening, element, count);
 }
 
 static AstNodeId parse_variable(Parser *parser)

@@ -33,9 +33,9 @@ typedef struct {
 
 enum { MAX_ANALYSIS_DEPTH = 256 };
 
-static const SemaType no_type = {TYPE_INVALID, 0};
-static const SemaType bool_type = {TYPE_BOOL, 0};
-static const SemaType void_type = {TYPE_VOID, 0};
+static const SemaType no_type = {.kind = TYPE_INVALID};
+static const SemaType bool_type = {.kind = TYPE_BOOL};
+static const SemaType void_type = {.kind = TYPE_VOID};
 
 const char *sema_type_name(TypeKind type)
 {
@@ -43,9 +43,21 @@ const char *sema_type_name(TypeKind type)
         [TYPE_INVALID] = "invalid", [TYPE_VOID] = "void", [TYPE_BOOL] = "bool",
         [TYPE_I8] = "i8", [TYPE_I16] = "i16", [TYPE_I32] = "i32", [TYPE_I64] = "i64",
         [TYPE_U8] = "u8", [TYPE_U16] = "u16", [TYPE_U32] = "u32", [TYPE_U64] = "u64",
-        [TYPE_F32] = "f32", [TYPE_F64] = "f64", [TYPE_BYTES] = "bytes",
+        [TYPE_F32] = "f32", [TYPE_F64] = "f64",
+        [TYPE_ARRAY] = "array", [TYPE_SLICE] = "slice",
     };
     return names[type];
+}
+
+uint32_t sema_scalar_size(TypeKind type)
+{
+    static const uint8_t sizes[] = {
+        [TYPE_INVALID] = 0, [TYPE_VOID] = 0, [TYPE_BOOL] = 1,
+        [TYPE_I8] = 1, [TYPE_I16] = 2, [TYPE_I32] = 4, [TYPE_I64] = 8,
+        [TYPE_U8] = 1, [TYPE_U16] = 2, [TYPE_U32] = 4, [TYPE_U64] = 8,
+        [TYPE_F32] = 4, [TYPE_F64] = 8, [TYPE_ARRAY] = 0, [TYPE_SLICE] = 0,
+    };
+    return sizes[type];
 }
 
 static bool failed(const Checker *checker)
@@ -101,7 +113,12 @@ static bool is_numeric(TypeKind type)
 
 static bool same_type(SemaType a, SemaType b)
 {
-    return a.kind == b.kind && a.length == b.length;
+    return a.kind == b.kind && a.length == b.length && a.element == b.element;
+}
+
+static bool is_array_like(TypeKind type)
+{
+    return type == TYPE_ARRAY || type == TYPE_SLICE;
 }
 
 static AstSpan node_span(const Ast *ast, AstNodeId id)
@@ -131,13 +148,35 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     if (id == AST_NODE_NONE) {
         return void_type;
     }
+    if (checker->ast->kinds[id] == AST_ARRAY_TYPE) {
+        AstNodeData data = checker->ast->data[id];
+        SemaType element = resolve_type(checker, data.a);
+        if (failed(checker)) {
+            return no_type;
+        }
+        if (!data.b) {
+            return (SemaType){.kind = TYPE_SLICE, .element = element.kind};
+        }
+
+        AstSpan count = node_span(checker->ast, data.b);
+        uint32_t limit = (INT32_MAX - 7u) / sema_scalar_size(element.kind);
+        uint32_t length = 0;
+        for (uint32_t i = 0; i < count.length; i++) {
+            unsigned digit = checker->ast->source[count.offset + i] - '0';
+            if (length > (limit - digit) / 10) {
+                return fail(checker, data.b, "array is too large for local storage");
+            }
+            length = length * 10 + digit;
+        }
+        return (SemaType){.kind = TYPE_ARRAY, .length = length, .element = element.kind};
+    }
     AstSpan name = node_span(checker->ast, id);
     if (name_is(checker->ast, name, "int")) {
-        return (SemaType){TYPE_I32, 0};
+        return (SemaType){.kind = TYPE_I32};
     }
     for (TypeKind kind = TYPE_BOOL; kind <= TYPE_F64; kind++) {
         if (name_is(checker->ast, name, sema_type_name(kind))) {
-            return (SemaType){kind, 0};
+            return (SemaType){.kind = kind};
         }
     }
     return fail(checker, id, "unknown type");
@@ -191,9 +230,19 @@ static bool register_functions(Checker *checker)
         }
         *entry = i + 1;
         checker->sema->functions[i].result = resolve_type(checker, function.return_type);
+        if (is_array_like(checker->sema->functions[i].result.kind)) {
+            fail(checker, function.return_type, "function results must be scalar");
+        }
         for (uint32_t p = 0; p < function.parameters.count && !failed(checker); p++) {
             AstNodeId param = ast->children[function.parameters.first + p];
-            checker->sema->nodes[param].type = resolve_type(checker, ast->data[param].b);
+            AstNodeId annotation = ast->data[param].b;
+            SemaType type = resolve_type(checker, annotation);
+            if (type.kind == TYPE_ARRAY) {
+                fail(checker, annotation, "pass fixed arrays through a slice parameter");
+            } else if (type.kind == TYPE_SLICE && !function.body) {
+                fail(checker, annotation, "external parameters must be scalar");
+            }
+            checker->sema->nodes[param].type = type;
         }
     }
     return true;
@@ -273,7 +322,7 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
 static SemaType integer_literal(Checker *checker, AstNodeId id, SemaType expected, bool negative)
 {
     const Ast *ast = checker->ast;
-    SemaType type = is_integer(expected.kind) ? expected : (SemaType){TYPE_I32, 0};
+    SemaType type = is_integer(expected.kind) ? expected : (SemaType){.kind = TYPE_I32};
     if (negative && !is_signed(type.kind)) {
         return fail(checker, id, "unary '-' requires a signed number");
     }
@@ -297,7 +346,7 @@ static SemaType integer_literal(Checker *checker, AstNodeId id, SemaType expecte
 
 static SemaType float_literal(Checker *checker, AstNodeId id, SemaType expected)
 {
-    SemaType type = is_float(expected.kind) ? expected : (SemaType){TYPE_F64, 0};
+    SemaType type = is_float(expected.kind) ? expected : (SemaType){.kind = TYPE_F64};
     AstSpan span = node_span(checker->ast, id);
     if ((uintmax_t)span.length + 1 > SIZE_MAX) {
         return fail(checker, id, "floating-point literal is too large");
@@ -333,7 +382,7 @@ static SemaType string_literal(Checker *checker, AstNodeId id)
             return no_type;
         }
     }
-    return (SemaType){TYPE_BYTES, length};
+    return (SemaType){.kind = TYPE_ARRAY, .length = length, .element = TYPE_U8};
 }
 
 static SemaType check_identifier(Checker *checker, AstNodeId id)
@@ -365,6 +414,17 @@ static SemaType check_call(Checker *checker, AstNodeId id)
         return fail(checker, callee, "local variable is not callable");
     }
     uint32_t entry = *function_entry(checker, name);
+    if (!entry && name_is(ast, name, "len")) {
+        if (node.b != 2) {
+            return fail(checker, id, "len expects one array or slice argument");
+        }
+        SemaType operand = value(checker, ast->children[node.a + 1], no_type);
+        if (!is_array_like(operand.kind)) {
+            return fail(checker, id, "len expects an array or slice");
+        }
+        checker->sema->nodes[id].is_builtin_len = true;
+        return (SemaType){.kind = TYPE_I64};
+    }
     if (!entry) {
         return fail(checker, callee, "unknown function");
     }
@@ -417,8 +477,14 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         return bool_type;
     }
     if (is_assignment(kind)) {
-        if (ast->kinds[node.a] != AST_IDENTIFIER || boolean_name(ast, node_span(ast, node.a))) {
-            return fail(checker, node.a, "assignment requires a local variable");
+        if (ast->kinds[node.a] == AST_INDEX) {
+            AstNodeId base = ast->data[node.a].a;
+            if (ast->kinds[base] != AST_IDENTIFIER) {
+                return fail(checker, node.a, "index assignment requires a local fixed array");
+            }
+        } else if (ast->kinds[node.a] != AST_IDENTIFIER ||
+                   boolean_name(ast, node_span(ast, node.a))) {
+            return fail(checker, node.a, "assignment requires a local variable or array element");
         }
     }
     SemaType context = !is_comparison(kind) && is_numeric(expected.kind) ? expected : no_type;
@@ -433,6 +499,10 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
     }
     if (failed(checker)) {
         return no_type;
+    }
+    if (is_assignment(kind) && ast->kinds[node.a] == AST_INDEX &&
+        checker->sema->nodes[ast->data[node.a].a].type.kind != TYPE_ARRAY) {
+        return fail(checker, node.a, "index assignment requires a local fixed array");
     }
     if (kind == AST_ASSIGN) {
         return operand;
@@ -490,10 +560,20 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
     case AST_INDEX: {
         SemaType base = value(checker, node.a, no_type);
         SemaType index = value(checker, node.b, no_type);
-        if (base.kind != TYPE_BYTES || !is_integer(index.kind)) {
-            return fail(checker, id, "indexing requires a byte array and an integer index");
+        if (!is_array_like(base.kind) || !is_integer(index.kind)) {
+            return fail(checker, id, "indexing requires an array or slice and an integer index");
         }
-        return (SemaType){TYPE_U8, 0};
+        return (SemaType){.kind = base.element};
+    }
+    case AST_SLICE: {
+        SemaType base = value(checker, node.a, no_type);
+        AstNodeData bounds = ast->data[node.b];
+        SemaType start = value(checker, bounds.a, no_type);
+        SemaType end = value(checker, bounds.b, no_type);
+        if (!is_array_like(base.kind) || !is_integer(start.kind) || !is_integer(end.kind)) {
+            return fail(checker, id, "slicing requires an array or slice and integer bounds");
+        }
+        return (SemaType){.kind = TYPE_SLICE, .element = base.element};
     }
     case AST_MEMBER:
         value(checker, node.a, no_type);

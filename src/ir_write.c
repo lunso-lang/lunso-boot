@@ -9,8 +9,10 @@ static void write_span(FILE *output, const IrModule *module, AstSpan span)
 
 static void write_type(FILE *output, SemaType type)
 {
-    if (type.kind == TYPE_BYTES) {
-        fprintf(output, "u8[%" PRIu32 "]", type.length);
+    if (type.kind == TYPE_ARRAY) {
+        fprintf(output, "[%" PRIu32 "]%s", type.length, sema_type_name(type.element));
+    } else if (type.kind == TYPE_SLICE) {
+        fprintf(output, "[]%s", sema_type_name(type.element));
     } else {
         fputs(sema_type_name(type.kind), output);
     }
@@ -104,12 +106,45 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
             write_value(output, instruction.b);
         }
         break;
-    case IR_INDEX:
-        fputs("index.u8 ", output);
+    case IR_ARRAY_ALLOC:
+        fputs("alloc.", output);
+        write_type(output, instruction.type);
+        break;
+    case IR_ARRAY_INIT:
+        fputs("init.", output);
+        write_type(output, instruction.type);
+        fputc(' ', output);
+        write_value(output, instruction.a);
+        fputs(", ", output);
+        if (instruction.b) {
+            write_value(output, instruction.b);
+        } else {
+            fputc('0', output);
+        }
+        break;
+    case IR_WIDEN_INDEX:
+    case IR_LEN:
+    case IR_ELEMENT_LOAD:
+        fputs(instruction.op == IR_LEN ? "len." :
+              instruction.op == IR_WIDEN_INDEX ? "widen_index." : "load_element.", output);
+        write_type(output, instruction.type);
+        fputc(' ', output);
+        write_value(output, instruction.a);
+        break;
+    case IR_ELEMENT_ADDRESS:
+    case IR_ELEMENT_STORE:
+    case IR_SLICE:
+        fputs(instruction.op == IR_SLICE ? "slice." :
+              instruction.op == IR_ELEMENT_ADDRESS ? "element_address." : "store_element.", output);
+        write_type(output, instruction.type);
+        fputc(' ', output);
         write_value(output, instruction.a);
         fputs(", ", output);
         write_value(output, instruction.b);
-        fprintf(output, ", %" PRIu32, instruction.c);
+        if (instruction.op == IR_SLICE) {
+            fputs(", ", output);
+            write_value(output, instruction.c);
+        }
         break;
     case IR_CALL:
         fputs("call.", output);

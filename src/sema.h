@@ -8,18 +8,20 @@ typedef enum {
     TYPE_INVALID, TYPE_VOID, TYPE_BOOL,
     TYPE_I8, TYPE_I16, TYPE_I32, TYPE_I64,
     TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64,
-    TYPE_F32, TYPE_F64, TYPE_BYTES,
+    TYPE_F32, TYPE_F64, TYPE_ARRAY, TYPE_SLICE,
 } TypeKind;
 
 typedef struct {
     TypeKind kind;
     uint32_t length;  // Number of elements for fixed arrays.
+    TypeKind element;  // Scalar element type for arrays and slices.
 } SemaType;
 
 typedef struct {
     SemaType type;
     uint32_t binding;  // Local slot, or function index on AST_CALL.
     bool is_boolean_literal;
+    bool is_builtin_len;
     bool falls_through;
 } SemaNode;
 
@@ -41,3 +43,4 @@ typedef struct {
 bool sema_check(const Ast *ast, Sema *out, SemaError *error);
 void sema_destroy(Sema *sema);
 const char *sema_type_name(TypeKind type);
+uint32_t sema_scalar_size(TypeKind type);

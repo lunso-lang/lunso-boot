@@ -22,6 +22,7 @@ enum {
     AST_FUNCTION,   // a: functions index
     AST_PARAMETER,  // a: name length, b: type node
     AST_TYPE_NAME,  // a: name length
+    AST_ARRAY_TYPE, // a: element type, b: length literal or AST_NODE_NONE for a slice
 
     AST_BLOCK,   // a: first item in children, b: item count
     AST_RETURN,  // a: value node or AST_NODE_NONE
@@ -36,6 +37,8 @@ enum {
     AST_STRING,      // a: raw literal length in bytes, including quotes
     AST_CALL,        // a: first item in children, b: item count (callee, then arguments)
     AST_INDEX,       // a: base node, b: index expression node
+    AST_SLICE,       // a: base node, b: range node
+    AST_SLICE_RANGE, // a: start expression, b: end expression
     AST_MEMBER,      // a: base node, b: member name length
 
     // Unary operators store the operand node in a.

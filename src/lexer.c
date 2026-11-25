@@ -176,7 +176,7 @@ static TokenKind scan_token(Lexer *lexer)
     case ';':
         return TOKEN_SEMICOLON;
     case '.':
-        return TOKEN_DOT;
+        return match(lexer, '.') ? TOKEN_DOT_DOT : TOKEN_DOT;
     case '{':
         return TOKEN_LEFT_BRACE;
     case '}':

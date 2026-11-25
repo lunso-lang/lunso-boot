@@ -1,0 +1,25 @@
+fun count_newlines(data: []u8): i64 {
+    var count: i64 = 0
+    for var i: i64 = 0; i < len(data); i += 1 {
+        if data[i] == 10 {
+            count += 1
+        }
+    }
+    return count
+}
+
+fun main(): i32 {
+    var buffer: [256]u8
+    buffer[1] = 10
+    buffer[4] = 10
+
+    var part: []u8 = buffer[0..2]
+    if count_newlines(part) != 1 {
+        return 1
+    }
+    part = buffer[0..5]
+    if count_newlines(part) != 2 {
+        return 2
+    }
+    return 0
+}

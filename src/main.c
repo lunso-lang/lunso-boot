@@ -92,6 +92,7 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         [TOKEN_COMMA] = "COMMA",
         [TOKEN_SEMICOLON] = "SEMICOLON",
         [TOKEN_DOT] = "DOT",
+        [TOKEN_DOT_DOT] = "DOT_DOT",
         [TOKEN_LEFT_BRACE] = "LEFT_BRACE",
         [TOKEN_RIGHT_BRACE] = "RIGHT_BRACE",
         [TOKEN_LEFT_BRACKET] = "LEFT_BRACKET",

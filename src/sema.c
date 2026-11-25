@@ -31,6 +31,7 @@ typedef struct {
     uint8_t *const_state;
     uint32_t pointee_capacity;
     uint32_t element_capacity;
+    uint32_t match_value_capacity;
     Local *locals;
     size_t local_count;
     size_t local_capacity;
@@ -378,6 +379,9 @@ enum { STRUCT_UNVISITED = 0, STRUCT_VISITING = 1, STRUCT_DONE = 2 };
 
 static const Local *find_local(const Checker *checker, AstSpan name, size_t first);
 static void check_const(Checker *checker, uint32_t index);
+static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
+                           uint64_t *out_bits, AstNodeId *out_string);
+static uint64_t normalize_int_bits(TypeKind kind, uint64_t bits);
 
 static uint32_t find_const(const Ast *ast, uint32_t module, AstSpan name)
 {
@@ -1723,6 +1727,140 @@ static uint32_t resolve_loop_target(Checker *checker, AstNodeId id, bool is_brea
     return 0;
 }
 
+static bool add_match_value(Checker *checker, AstNodeId id, uint64_t bits, uint32_t *out_index)
+{
+    Sema *sema = checker->sema;
+    if (sema->match_value_count == checker->match_value_capacity) {
+        uint32_t capacity = checker->match_value_capacity;
+        if (capacity > UINT32_MAX / 2) {
+            fail(checker, id, "could not allocate match value storage");
+            return false;
+        }
+        capacity = capacity ? capacity * 2 : 16;
+        uint64_t *values = realloc(sema->match_values, capacity * sizeof(*values));
+        if (!values) {
+            fail(checker, id, "could not allocate match value storage");
+            return false;
+        }
+        sema->match_values = values;
+        checker->match_value_capacity = capacity;
+    }
+    *out_index = sema->match_value_count++;
+    sema->match_values[*out_index] = bits;
+    return true;
+}
+
+static bool check_match(Checker *checker, AstNodeId id)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    AstNodeId scrutinee = ast->children[node.a];
+    SemaType scrut = value(checker, scrutinee, no_type);
+    if (failed(checker)) {
+        return false;
+    }
+    if (!is_integer(scrut.kind) && scrut.kind != TYPE_BOOL) {
+        fail(checker, scrutinee, "match requires an integer, bool, or enum value");
+        return false;
+    }
+    if (node.b < 2) {
+        fail(checker, id, "match must have at least one arm");
+        return false;
+    }
+
+    uint32_t pat_start = checker->sema->match_value_count;
+    bool has_else = false;
+    bool falls = false;
+
+    for (uint32_t i = 1; i < node.b && !failed(checker); i++) {
+        AstNodeId arm_id = ast->children[node.a + i];
+        AstNodeData arm = ast->data[arm_id];
+        AstNodeId body = ast->children[arm.a + arm.b - 1];
+        if (arm.b == 1) {
+            if (i != node.b - 1) {
+                fail(checker, arm_id, "else arm must be the last arm in match");
+                return false;
+            }
+            has_else = true;
+        } else {
+            for (uint32_t p = 0; p < arm.b - 1 && !failed(checker); p++) {
+                AstNodeId pat = ast->children[arm.a + p];
+                uint64_t bits = 0;
+                AstNodeId str_node = AST_NODE_NONE;
+                SemaType pat_type = eval_const(checker, pat, scrut, &bits, &str_node);
+                if (failed(checker)) {
+                    return false;
+                }
+                if (str_node != AST_NODE_NONE) {
+                    fail(checker, pat, "type mismatch");
+                    return false;
+                }
+                if (!same_type(pat_type, scrut)) {
+                    if (!is_enum(pat_type) && !is_enum(scrut) &&
+                        can_promote(pat_type.kind, scrut.kind)) {
+                        bits = normalize_int_bits(scrut.kind, bits);
+                    } else {
+                        fail(checker, pat, "type mismatch");
+                        return false;
+                    }
+                }
+                for (uint32_t k = pat_start; k < checker->sema->match_value_count; k++) {
+                    if (checker->sema->match_values[k] == bits) {
+                        fail(checker, pat, "duplicate match pattern");
+                        return false;
+                    }
+                }
+                uint32_t idx = 0;
+                if (!add_match_value(checker, pat, bits, &idx)) {
+                    return false;
+                }
+                checker->sema->nodes[pat].binding = idx;
+            }
+        }
+        bool arm_falls = check_statement(checker, body);
+        falls = falls || arm_falls;
+    }
+
+    if (!failed(checker) && !has_else) {
+        if (is_enum(scrut)) {
+            AstNodeRange cases = ast->enums[scrut.record - 1].cases;
+            for (uint32_t c = 0; c < cases.count; c++) {
+                AstNodeId case_node = ast->children[cases.first + c];
+                uint64_t val = checker->sema->enum_values[checker->sema->nodes[case_node].binding];
+                bool covered = false;
+                for (uint32_t k = pat_start; k < checker->sema->match_value_count; k++) {
+                    if (checker->sema->match_values[k] == val) {
+                        covered = true;
+                        break;
+                    }
+                }
+                if (!covered) {
+                    fail(checker, id, "match does not cover all enum cases");
+                    return false;
+                }
+            }
+        } else if (scrut.kind == TYPE_BOOL) {
+            bool has_false = false, has_true = false;
+            for (uint32_t k = pat_start; k < checker->sema->match_value_count; k++) {
+                if (checker->sema->match_values[k] == 0) {
+                    has_false = true;
+                } else if (checker->sema->match_values[k] == 1) {
+                    has_true = true;
+                }
+            }
+            if (!has_false || !has_true) {
+                fail(checker, id, "match does not cover all bool values");
+                return false;
+            }
+        } else {
+            fail(checker, id, "integer match requires an else arm");
+            return false;
+        }
+    }
+
+    return falls;
+}
+
 static bool statement_falls_through(Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
@@ -1750,6 +1888,8 @@ static bool statement_falls_through(Checker *checker, AstNodeId id)
         bool else_falls = !branches.else_branch || check_statement(checker, branches.else_branch);
         return then_falls || else_falls;
     }
+    case AST_MATCH:
+        return check_match(checker, id);
     case AST_FOR:
     case AST_FOR_C_STYLE:
         return check_loop(checker, id);
@@ -1849,6 +1989,7 @@ void sema_destroy(Sema *sema)
     free(sema->enum_values);
     free(sema->const_values);
     free(sema->const_strings);
+    free(sema->match_values);
     *sema = (Sema){0};
 }
 

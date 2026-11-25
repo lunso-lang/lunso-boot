@@ -72,7 +72,8 @@ static void sb_append(StrBuf *sb, const char *fmt, ...)
 
 static const char *const TOKENS[] = {
     "fun ", "ext ", "struct ", "enum ", "as ", "const ", "import ",
-    "pub ", "priv ", "return ", "if ", "else ", "for ", "break ", "continue ", "var ",
+    "pub ", "priv ", "return ", "if ", "else ", "match ", "for ", "break ", "continue ", "var ",
+    "=>",
     "i32", "i64", "u8", "u64", "f64", "bool", "len(", "data(", "size_of(",
     "{", "}", "(", ")", "[", "]", ";", ":", ",", ".", "..",
     "=", "==", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%",
@@ -252,7 +253,7 @@ static void emit_expr(StrBuf *sb, int depth)
 
 static void emit_stmt(StrBuf *sb, int depth)
 {
-    switch (rng_range(depth > 0 ? 10 : 3)) {
+    switch (rng_range(depth > 0 ? 11 : 3)) {
     case 0: {
         int form = (int)rng_range(3);
         sb_append(sb, "var v%zu", rng_range(5));
@@ -317,6 +318,11 @@ static void emit_stmt(StrBuf *sb, int depth)
         break;
     case 9:
         sb_append(sb, "const LC%d = %zu\n", depth, rng_range(50));
+        break;
+    case 10:
+        sb_append(sb, "match x {\n0, 1 => x = 2\nelse => {\n");
+        emit_stmt(sb, depth - 1);
+        sb_append(sb, "}\n}\n");
         break;
     }
 }

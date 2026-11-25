@@ -465,6 +465,64 @@ static void lower_if(Lowering *lowering, AstNodeId id)
     }
 }
 
+static void lower_match(Lowering *lowering, AstNodeId id)
+{
+    const Ast *ast = lowering->ast;
+    AstNodeData data = ast->data[id];
+    AstNodeId scrutinee = ast->children[data.a];
+    uint32_t scrut = lower_expression(lowering, scrutinee);
+    SemaType scrut_type = lowering->sema->nodes[scrutinee].type;
+    uint32_t end_label = label(lowering);
+    uint32_t arm_count = data.b - 1;
+
+    for (uint32_t i = 0; i < arm_count && !lowering->failed; i++) {
+        AstNodeId arm_id = ast->children[data.a + 1 + i];
+        AstNodeData arm = ast->data[arm_id];
+        AstNodeId body = ast->children[arm.a + arm.b - 1];
+        if (arm.b == 1) {
+            lower_statement(lowering, body);
+            if (lowering->sema->nodes[body].falls_through) {
+                jump(lowering, end_label);
+            }
+            break;
+        }
+
+        uint32_t arm_body = label(lowering);
+        bool is_last = (i == arm_count - 1);
+        uint32_t next_arm = is_last ? 0 : label(lowering);
+        if (is_last) {
+            jump(lowering, arm_body);
+        } else {
+            for (uint32_t p = 0; p < arm.b - 1 && !lowering->failed; p++) {
+                AstNodeId pat = ast->children[arm.a + p];
+                uint64_t bits = lowering->sema->match_values[lowering->sema->nodes[pat].binding];
+                uint32_t pat_val = emit_value(lowering,
+                                              scrut_type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
+                                              scrut_type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+                uint32_t cmp = emit_value(lowering, IR_EQUAL, scrut_type, scrut, pat_val, 0);
+                bool last_pat = (p + 1 == arm.b - 1);
+                uint32_t next_pat = last_pat ? next_arm : label(lowering);
+                branch(lowering, cmp, arm_body, next_pat);
+                if (!last_pat) {
+                    emit_label(lowering, next_pat);
+                }
+            }
+        }
+        emit_label(lowering, arm_body);
+        lower_statement(lowering, body);
+        if (lowering->sema->nodes[body].falls_through) {
+            jump(lowering, end_label);
+        }
+        if (!is_last) {
+            emit_label(lowering, next_arm);
+        }
+    }
+
+    if (lowering->sema->nodes[id].falls_through) {
+        emit_label(lowering, end_label);
+    }
+}
+
 static void lower_loop(Lowering *lowering, AstNodeId id)
 {
     AstNodeData data = lowering->ast->data[id];
@@ -528,6 +586,9 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
     }
     case AST_IF:
         lower_if(lowering, id);
+        break;
+    case AST_MATCH:
+        lower_match(lowering, id);
         break;
     case AST_FOR:
     case AST_FOR_C_STYLE:

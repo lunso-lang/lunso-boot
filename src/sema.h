@@ -50,8 +50,10 @@ typedef struct {
     uint64_t *enum_values;
     uint64_t *const_values;
     AstNodeId *const_strings;
+    uint64_t *match_values;
     uint32_t pointee_count;
     uint32_t element_count;
+    uint32_t match_value_count;
 } Sema;
 
 typedef struct {

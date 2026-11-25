@@ -78,6 +78,7 @@ static TokenKind scan_identifier(Lexer *lexer, size_t start)
         {"return", TOKEN_RETURN},
         {"if", TOKEN_IF},
         {"else", TOKEN_ELSE},
+        {"match", TOKEN_MATCH},
         {"for", TOKEN_FOR},
         {"break", TOKEN_BREAK},
         {"continue", TOKEN_CONTINUE},
@@ -235,6 +236,9 @@ static TokenKind scan_token(Lexer *lexer)
     case '%':
         return match(lexer, '=') ? TOKEN_PERCENT_EQUAL : TOKEN_PERCENT;
     case '=':
+        if (match(lexer, '>')) {
+            return TOKEN_FAT_ARROW;
+        }
         return match(lexer, '=') ? TOKEN_EQUAL_EQUAL : TOKEN_EQUAL;
     case '!':
         return match(lexer, '=') ? TOKEN_BANG_EQUAL : TOKEN_BANG;

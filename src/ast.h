@@ -37,6 +37,8 @@ enum {
     AST_BLOCK,   // a: first item in children, b: item count
     AST_RETURN,  // a: value node or AST_NODE_NONE
     AST_IF,      // a: condition node, b: if_branches index
+    AST_MATCH,     // a: first item in children, b: item count (scrutinee, then AST_MATCH_ARM)
+    AST_MATCH_ARM, // a: first item in children, b: item count (0+ patterns, then body)
     AST_FOR,          // a: condition node or AST_NODE_NONE, b: body block
     AST_FOR_C_STYLE,  // a: for_headers index, b: body block
     AST_BREAK,        // a: optional label AST_IDENTIFIER or AST_NODE_NONE

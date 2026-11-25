@@ -71,6 +71,7 @@ static const Infix infix_operators[] = {
 };
 
 static AstNodeId parse_expression(Parser *parser, unsigned minimum);
+static AstNodeId parse_statement(Parser *parser);
 static AstNodeId parse_block(Parser *parser);
 static AstNodeId parse_type(Parser *parser);
 static AstSpan source_span(const Parser *parser, Token token);
@@ -458,6 +459,52 @@ static AstNodeId parse_if(Parser *parser)
     return add_node(parser, AST_IF, keyword, condition, index);
 }
 
+static AstNodeId parse_match(Parser *parser)
+{
+    if (!enter(parser)) {
+        return AST_NODE_NONE;
+    }
+    Token keyword = expect(parser, TOKEN_MATCH, "expected 'match'");
+    bool saved = parser->disallow_struct_literal;
+    parser->disallow_struct_literal = true;
+    AstNodeId scrutinee = parse_expression(parser, PREC_ASSIGNMENT);
+    parser->disallow_struct_literal = saved;
+
+    expect(parser, TOKEN_LEFT_BRACE, "expected '{' after match expression");
+    uint32_t mark = parser->builder->pending_count;
+    push_child(parser, scrutinee);
+    while (!failed(parser) && is_separator(parser->current.kind)) {
+        advance(parser);
+    }
+    while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_BRACE &&
+           parser->current.kind != TOKEN_EOF) {
+        Token arm_tok = parser->current;
+        uint32_t arm_mark = parser->builder->pending_count;
+        if (!match(parser, TOKEN_ELSE)) {
+            do {
+                push_child(parser, parse_expression(parser, PREC_ASSIGNMENT));
+            } while (match(parser, TOKEN_COMMA));
+        }
+        expect(parser, TOKEN_FAT_ARROW, "expected '=>' after match pattern");
+        AstNodeId body = parser->current.kind == TOKEN_LEFT_BRACE
+                         ? parse_block(parser)
+                         : parse_statement(parser);
+        push_child(parser, body);
+        AstNodeRange arm_items = finish_children(parser, arm_mark);
+        push_child(parser, add_node(parser, AST_MATCH_ARM, arm_tok,
+                                    arm_items.first, arm_items.count));
+        if (parser->current.kind == TOKEN_EOF) {
+            break;
+        }
+        finish_item(parser, TOKEN_RIGHT_BRACE,
+                    "expected a newline, ';', or '}' after match arm");
+    }
+    expect(parser, TOKEN_RIGHT_BRACE, "expected '}' after match");
+    AstNodeRange items = finish_children(parser, mark);
+    parser->recursion_depth--;
+    return add_node(parser, AST_MATCH, keyword, items.first, items.count);
+}
+
 static AstNodeId parse_type_name(Parser *parser)
 {
     Token type = expect(parser, TOKEN_IDENTIFIER, "expected a type name");
@@ -612,6 +659,8 @@ static AstNodeId parse_statement(Parser *parser)
     switch (token.kind) {
     case TOKEN_IF:
         return parse_if(parser);
+    case TOKEN_MATCH:
+        return parse_match(parser);
     case TOKEN_FOR:
         return parse_for_with_label(parser, (AstSpan){0});
     case TOKEN_BREAK:

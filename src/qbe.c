@@ -3,6 +3,7 @@
 #include "literal.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct {
@@ -20,6 +21,7 @@ static const QbeType types[] = {
     [TYPE_F32] = {'s', "s", NULL}, [TYPE_F64] = {'d', "d", NULL},
     [TYPE_STRUCT] = {'l', NULL, NULL}, [TYPE_ARRAY] = {'l', NULL, NULL},
     [TYPE_SLICE] = {'l', NULL, NULL},
+    [TYPE_POINTER] = {'l', "l", NULL},
 };
 
 static bool is_signed(TypeKind type)
@@ -193,6 +195,21 @@ static char memory_suffix(TypeKind type)
     return size == 1 ? 'b' : size == 2 ? 'h' : types[type].base;
 }
 
+static void write_load(FILE *out, TypeKind kind, uint32_t result, const char *name, uint32_t address)
+{
+    QbeType type = types[kind];
+    const char *sign = type.extend ? (is_signed(kind) ? "s" : "u") : "";
+    fprintf(out, "\t%%v%" PRIu32 " =%c load%s%c %%%s%" PRIu32 "\n",
+            result, type.base, sign, memory_suffix(kind), name, address);
+}
+
+static void write_store(FILE *out, TypeKind kind, const char *value_name, uint32_t value,
+                        const char *address_name, uint32_t address)
+{
+    fprintf(out, "\tstore%c %%%s%" PRIu32 ", %%%s%" PRIu32 "\n",
+            memory_suffix(kind), value_name, value, address_name, address);
+}
+
 static void write_comparison(FILE *out, IrInstruction inst)
 {
     static const char *const relation[] = {
@@ -272,7 +289,8 @@ static void write_integer_cast(FILE *out, uint32_t result, uint32_t value,
     fprintf(out, "\t%%v%" PRIu32 " =%c %s %%v%" PRIu32 "\n", result, target.base, op, value);
 }
 
-static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
+static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
+                              const TypeKind *addressed)
 {
     IrInstruction inst = module->instructions[index];
     switch (inst.op) {
@@ -294,6 +312,10 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
         fprintf(out, "\t%%v%" PRIu32 " =l copy $.lunso.bytes.%" PRIu32 "\n", inst.result, index);
         break;
     case IR_LOAD:
+        if (addressed && addressed[inst.a] != TYPE_INVALID) {
+            write_load(out, inst.type.kind, inst.result, "local", inst.a);
+            break;
+        }
         fprintf(out, "\t%%v%" PRIu32 " =%c copy %%s%" PRIu32 "\n",
                 inst.result, types[inst.type.kind].base, inst.a);
         if (inst.type.kind == TYPE_SLICE) {
@@ -301,6 +323,10 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
         }
         break;
     case IR_STORE:
+        if (addressed && addressed[inst.a] != TYPE_INVALID) {
+            write_store(out, inst.type.kind, "v", inst.b, "local", inst.a);
+            break;
+        }
         fprintf(out, "\t%%s%" PRIu32 " =%c copy %%v%" PRIu32 "\n",
                 inst.a, types[inst.type.kind].base, inst.b);
         if (inst.type.kind == TYPE_SLICE) {
@@ -327,21 +353,18 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
         fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %" PRIu32 "\n",
                 inst.result, inst.a, inst.b);
         break;
+    case IR_LOCAL_ADDRESS:
+        fprintf(out, "\t%%v%" PRIu32 " =l copy %%local%" PRIu32 "\n", inst.result, inst.a);
+        break;
     case IR_ARRAY_VIEW:
         fprintf(out, "\t%%v%" PRIu32 " =l copy %%v%" PRIu32 "\n", inst.result, inst.a);
         fprintf(out, "\t%%len%" PRIu32 " =l copy %" PRIu32 "\n", inst.result, inst.type.length);
         break;
-    case IR_MEMORY_LOAD: {
-        QbeType type = types[inst.type.kind];
-        char suffix = memory_suffix(inst.type.kind);
-        const char *sign = type.extend ? (is_signed(inst.type.kind) ? "s" : "u") : "";
-        fprintf(out, "\t%%v%" PRIu32 " =%c load%s%c %%v%" PRIu32 "\n",
-                inst.result, type.base, sign, suffix, inst.a);
+    case IR_MEMORY_LOAD:
+        write_load(out, inst.type.kind, inst.result, "v", inst.a);
         break;
-    }
     case IR_MEMORY_STORE:
-        fprintf(out, "\tstore%c %%v%" PRIu32 ", %%v%" PRIu32 "\n",
-                memory_suffix(inst.type.kind), inst.b, inst.a);
+        write_store(out, inst.type.kind, "v", inst.b, "v", inst.a);
         break;
     case IR_LEN:
         fprintf(out, "\t%%v%" PRIu32 " =l copy ", inst.result);
@@ -379,8 +402,31 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
     }
 }
 
-static void write_function(FILE *out, const IrModule *module, IrFunction fn)
+static bool collect_addressed_slots(const IrModule *module, IrFunction fn, TypeKind **out)
 {
+    *out = NULL;
+    for (uint32_t i = 0; i < fn.instruction_count; i++) {
+        IrInstruction inst = module->instructions[fn.first_instruction + i];
+        if (inst.op != IR_LOCAL_ADDRESS) {
+            continue;
+        }
+        if (!*out) {
+            *out = calloc(fn.slot_count, sizeof(**out));
+            if (!*out) {
+                return false;
+            }
+        }
+        (*out)[inst.a] = inst.type.kind;
+    }
+    return true;
+}
+
+static bool write_function(FILE *out, const IrModule *module, IrFunction fn)
+{
+    TypeKind *addressed;
+    if (!collect_addressed_slots(module, fn, &addressed)) {
+        return false;
+    }
     bool is_main = fn.name.length == 4 && !memcmp(module->source + fn.name.offset, "main", 4);
     fputs(is_main ? "export function " : "function ", out);
     if (fn.result.kind != TYPE_VOID) {
@@ -403,12 +449,24 @@ static void write_function(FILE *out, const IrModule *module, IrFunction fn)
     bool has_bounds_check = false;
     for (uint32_t i = 0; i < fn.instruction_count; i++) {
         uint32_t index = fn.first_instruction + i;
-        write_instruction(out, module, index);
+        write_instruction(out, module, index, addressed);
         IrOp op = module->instructions[index].op;
         has_bounds_check |= op == IR_ELEMENT_ADDRESS || op == IR_SLICE;
         if (i == 0) {
+            if (addressed) {
+                for (uint32_t slot = 0; slot < fn.slot_count; slot++) {
+                    if (addressed[slot] != TYPE_INVALID) {
+                        fprintf(out, "\t%%local%" PRIu32 " =l alloc8 %" PRIu32 "\n",
+                                slot, sema_scalar_size(addressed[slot]));
+                    }
+                }
+            }
             for (uint32_t p = 0; p < fn.parameter_count; p++) {
                 TypeKind kind = module->parameters[fn.first_parameter + p].kind;
+                if (addressed && addressed[p] != TYPE_INVALID) {
+                    write_store(out, kind, "p", p, "local", p);
+                    continue;
+                }
                 QbeType type = types[kind];
                 fprintf(out, "\t%%s%" PRIu32 " =%c %s %%p%" PRIu32 "\n", p, type.base,
                         type.extend ? type.extend : "copy", p);
@@ -430,6 +488,8 @@ static void write_function(FILE *out, const IrModule *module, IrFunction fn)
         fputs("@bounds_fail\n\thlt\n", out);
     }
     fputs("}\n", out);
+    free(addressed);
+    return true;
 }
 
 bool qbe_write(FILE *out, const IrModule *module)
@@ -439,8 +499,8 @@ bool qbe_write(FILE *out, const IrModule *module)
     }
     for (uint32_t i = 0; i < module->function_count; i++) {
         IrFunction fn = module->functions[i];
-        if (!fn.external) {
-            write_function(out, module, fn);
+        if (!fn.external && !write_function(out, module, fn)) {
+            return false;
         }
     }
     return !ferror(out);

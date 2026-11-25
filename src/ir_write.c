@@ -17,6 +17,11 @@ static void write_type(FILE *output, const IrModule *module, SemaType type)
         fputs("[]", output);
         kind = type.element;
     }
+    while (kind == TYPE_POINTER) {
+        fputc('*', output);
+        type = module->pointees[type.pointee];
+        kind = type.kind;
+    }
     if (kind == TYPE_STRUCT) {
         write_span(output, module, module->struct_names[type.record]);
     } else {
@@ -111,6 +116,11 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
             fputs(", ", output);
             write_value(output, instruction.b);
         }
+        break;
+    case IR_LOCAL_ADDRESS:
+        fputs("local_address.", output);
+        write_type(output, module, instruction.type);
+        fprintf(output, " $%" PRIu32, instruction.a);
         break;
     case IR_STORAGE_ALLOC:
         fputs("alloc.", output);

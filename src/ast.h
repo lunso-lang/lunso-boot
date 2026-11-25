@@ -25,6 +25,7 @@ enum {
     AST_PARAMETER,  // a: name length, b: type node
     AST_TYPE_NAME,  // a: name length
     AST_ARRAY_TYPE, // a: element type, b: length literal or AST_NODE_NONE for a slice
+    AST_POINTER_TYPE, // a: pointee type
 
     AST_BLOCK,   // a: first item in children, b: item count
     AST_RETURN,  // a: value node or AST_NODE_NONE
@@ -43,6 +44,8 @@ enum {
     AST_SLICE_RANGE, // a: start expression, b: end expression
     AST_MEMBER,      // a: base node, b: member name length
     AST_CAST,        // a: operand node, b: destination type node
+    AST_ADDRESS_OF,  // a: addressable operand node
+    AST_DEREFERENCE, // a: pointer operand node
 
     // Unary operators store the operand node in a.
     AST_POSITIVE,

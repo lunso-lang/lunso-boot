@@ -273,6 +273,12 @@ static AstNodeId parse_operand(Parser *parser)
     case TOKEN_TILDE:
         kind = AST_BIT_NOT;
         break;
+    case TOKEN_AMPERSAND:
+        kind = AST_ADDRESS_OF;
+        break;
+    case TOKEN_STAR:
+        kind = AST_DEREFERENCE;
+        break;
     case TOKEN_LEFT_PAREN: {
         open_group(parser);
         AstNodeId value = parse_expression(parser, PREC_ASSIGNMENT);
@@ -385,10 +391,14 @@ static AstNodeId parse_type_name(Parser *parser)
     return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
 }
 
-static AstNodeId parse_type(Parser *parser)
+static AstNodeId parse_type_inner(Parser *parser)
 {
     Token opening = parser->current;
-    if (opening.kind != TOKEN_LEFT_BRACKET || failed(parser)) {
+    if (match(parser, TOKEN_STAR)) {
+        AstNodeId pointee = parse_type(parser);
+        return add_node(parser, AST_POINTER_TYPE, opening, pointee, 0);
+    }
+    if (opening.kind != TOKEN_LEFT_BRACKET) {
         return parse_type_name(parser);
     }
     open_group(parser);
@@ -398,8 +408,18 @@ static AstNodeId parse_type(Parser *parser)
         count = add_node(parser, AST_INTEGER, literal, (uint32_t)literal.length, 0);
     }
     close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after array length");
-    AstNodeId element = parse_type_name(parser);
+    AstNodeId element = parse_type(parser);
     return add_node(parser, AST_ARRAY_TYPE, opening, element, count);
+}
+
+static AstNodeId parse_type(Parser *parser)
+{
+    if (!enter(parser)) {
+        return AST_NODE_NONE;
+    }
+    AstNodeId type = parse_type_inner(parser);
+    parser->recursion_depth--;
+    return type;
 }
 
 static AstNodeId parse_variable(Parser *parser)

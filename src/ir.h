@@ -7,7 +7,8 @@
 typedef enum {
     IR_LABEL, IR_NUMBER, IR_BOOL, IR_BYTES, IR_ZERO, IR_LOAD, IR_STORE, IR_CALL,
     IR_STORAGE_ALLOC, IR_STORAGE_INIT, IR_WIDEN_INDEX, IR_ELEMENT_ADDRESS,
-    IR_FIELD_ADDRESS, IR_MEMORY_LOAD, IR_MEMORY_STORE, IR_SLICE, IR_ARRAY_VIEW, IR_LEN,
+    IR_FIELD_ADDRESS, IR_LOCAL_ADDRESS, IR_MEMORY_LOAD, IR_MEMORY_STORE,
+    IR_SLICE, IR_ARRAY_VIEW, IR_LEN,
     IR_INT_CAST,
     IR_JUMP, IR_BRANCH, IR_RETURN,
     IR_NEGATE, IR_LOGICAL_NOT, IR_BIT_NOT,
@@ -20,6 +21,7 @@ typedef enum {
 // Number/byte constants use a source offset and length in a and b. For a number,
 // c adds a minus sign. Array operations carry the collection type. Memory
 // access uses the scalar type, and field addresses carry their byte offset in b.
+// A local address carries the addressed slot's type and index (a).
 // Bounds are widened before use.
 // An integer cast stores the destination type and the source type kind in b.
 // A call stores a function index, the first argument index, and the argument count.
@@ -43,6 +45,7 @@ typedef struct {
 typedef struct {
     const unsigned char *source;  // Borrowed for names and literal spellings.
     AstSpan *struct_names;        // Indexed by SemaType.record.
+    SemaType *pointees;            // Indexed by SemaType.pointee.
     IrFunction *functions;
     uint32_t function_count;
     SemaType *parameters;

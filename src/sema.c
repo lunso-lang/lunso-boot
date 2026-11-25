@@ -18,6 +18,7 @@ typedef struct {
     uint32_t *function_map;
     size_t function_capacity;
     uint32_t *struct_sizes;
+    uint32_t pointee_capacity;
     Local *locals;
     size_t local_count;
     size_t local_capacity;
@@ -46,6 +47,7 @@ const char *sema_type_name(TypeKind type)
         [TYPE_U8] = "u8", [TYPE_U16] = "u16", [TYPE_U32] = "u32", [TYPE_U64] = "u64",
         [TYPE_F32] = "f32", [TYPE_F64] = "f64",
         [TYPE_STRUCT] = "struct", [TYPE_ARRAY] = "array", [TYPE_SLICE] = "slice",
+        [TYPE_POINTER] = "pointer",
     };
     return names[type];
 }
@@ -57,6 +59,7 @@ uint32_t sema_scalar_size(TypeKind type)
         [TYPE_I8] = 1, [TYPE_I16] = 2, [TYPE_I32] = 4, [TYPE_I64] = 8,
         [TYPE_U8] = 1, [TYPE_U16] = 2, [TYPE_U32] = 4, [TYPE_U64] = 8,
         [TYPE_F32] = 4, [TYPE_F64] = 8, [TYPE_STRUCT] = 0, [TYPE_ARRAY] = 0, [TYPE_SLICE] = 0,
+        [TYPE_POINTER] = 8,
     };
     return sizes[type];
 }
@@ -125,12 +128,48 @@ static bool is_numeric(TypeKind type)
 static bool same_type(SemaType a, SemaType b)
 {
     return a.kind == b.kind && a.length == b.length && a.element == b.element &&
-           a.record == b.record;
+           a.record == b.record && a.pointee == b.pointee;
 }
 
 static bool is_array_like(TypeKind type)
 {
     return type == TYPE_ARRAY || type == TYPE_SLICE;
+}
+
+static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee)
+{
+    if (failed(checker)) {
+        return no_type;
+    }
+    if (is_array_like(pointee.kind)) {
+        return fail(checker, id, "take the address of an array element instead");
+    }
+    Sema *sema = checker->sema;
+    for (uint32_t i = 0; i < sema->pointee_count; i++) {
+        if (same_type(sema->pointees[i], pointee)) {
+            return (SemaType){.kind = TYPE_POINTER, .pointee = i};
+        }
+    }
+    if (sema->pointee_count == checker->pointee_capacity) {
+        uint32_t capacity = checker->pointee_capacity;
+        if (capacity > UINT32_MAX / 2) {
+            return fail(checker, id, "could not allocate pointer type storage");
+        }
+        capacity = capacity ? capacity * 2 : 16;
+        size_t element_size = sizeof(*sema->pointees);
+        if (capacity > SIZE_MAX / element_size) {
+            return fail(checker, id, "could not allocate pointer type storage");
+        }
+        SemaType *pointees = realloc(sema->pointees, capacity * element_size);
+        if (!pointees) {
+            return fail(checker, id, "could not allocate pointer type storage");
+        }
+        sema->pointees = pointees;
+        checker->pointee_capacity = capacity;
+    }
+    uint32_t index = sema->pointee_count++;
+    sema->pointees[index] = pointee;
+    return (SemaType){.kind = TYPE_POINTER, .pointee = index};
 }
 
 static AstSpan node_span(const Ast *ast, AstNodeId id)
@@ -241,14 +280,23 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     if (id == AST_NODE_NONE) {
         return void_type;
     }
-    if (checker->ast->kinds[id] == AST_ARRAY_TYPE) {
+    AstKind ast_kind = checker->ast->kinds[id];
+    if (ast_kind == AST_POINTER_TYPE) {
+        SemaType pointee = resolve_type(checker, checker->ast->data[id].a);
+        return pointer_to(checker, id, pointee);
+    }
+    if (ast_kind == AST_ARRAY_TYPE) {
         AstNodeData data = checker->ast->data[id];
         SemaType element = resolve_type(checker, data.a);
         if (failed(checker)) {
             return no_type;
         }
+        if (is_array_like(element.kind)) {
+            return fail(checker, data.a, "collection elements must have a scalar or struct type");
+        }
         SemaType collection = {.kind = TYPE_SLICE, .element = element.kind,
-                               .record = element.record, .record_size = element.record_size};
+                               .record = element.record, .record_size = element.record_size,
+                               .pointee = element.pointee};
         if (!data.b) {
             return collection;
         }
@@ -415,7 +463,8 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
         return fail(checker, id, "a value is required here");
     }
     if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE &&
-        type.element == expected.element && type.record == expected.record) {
+        type.element == expected.element && type.record == expected.record &&
+        type.pointee == expected.pointee) {
         checker->sema->nodes[id].borrow_array = true;
         return expected;
     }
@@ -582,7 +631,8 @@ static bool writable_target(const Checker *checker, AstNodeId id)
         }
         id = base;
     }
-    return ast->kinds[id] == AST_IDENTIFIER && !checker->sema->nodes[id].is_boolean_literal;
+    return ast->kinds[id] == AST_DEREFERENCE ||
+           (ast->kinds[id] == AST_IDENTIFIER && !checker->sema->nodes[id].is_boolean_literal);
 }
 
 static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
@@ -596,7 +646,7 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         return bool_type;
     }
     AstKind target = ast->kinds[node.a];
-    if (is_assignment(kind) && target != AST_INDEX && target != AST_MEMBER &&
+    if (is_assignment(kind) && target != AST_INDEX && target != AST_MEMBER && target != AST_DEREFERENCE &&
         (target != AST_IDENTIFIER || boolean_name(ast, node_span(ast, node.a)))) {
         return fail(checker, node.a, "assignment requires a local variable, array element, or field");
     }
@@ -621,7 +671,8 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
     if (kind == AST_ASSIGN) {
         return operand;
     }
-    if ((kind == AST_EQUAL || kind == AST_NOT_EQUAL) && operand.kind == TYPE_BOOL) {
+    if ((kind == AST_EQUAL || kind == AST_NOT_EQUAL) &&
+        (operand.kind == TYPE_BOOL || operand.kind == TYPE_POINTER)) {
         return bool_type;
     }
     if (integer_operator(kind) ? !is_integer(operand.kind) : !is_numeric(operand.kind)) {
@@ -723,7 +774,8 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (!is_array_like(base.kind) || !is_integer(index.kind)) {
             return fail(checker, id, "indexing requires an array or slice and an integer index");
         }
-        return (SemaType){.kind = base.element, .record = base.record, .record_size = base.record_size};
+        return (SemaType){.kind = base.element, .record = base.record, .record_size = base.record_size,
+                          .pointee = base.pointee};
     }
     case AST_SLICE: {
         SemaType base = value(checker, node.a, no_type);
@@ -734,12 +786,29 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
             return fail(checker, id, "slicing requires an array or slice and integer bounds");
         }
         return (SemaType){.kind = TYPE_SLICE, .element = base.element, .record = base.record,
-                          .record_size = base.record_size};
+                          .record_size = base.record_size, .pointee = base.pointee};
     }
     case AST_MEMBER:
         return check_member(checker, id);
     case AST_CAST:
         return check_cast(checker, id);
+    case AST_ADDRESS_OF: {
+        SemaType operand = value(checker, node.a, no_type);
+        if (failed(checker)) {
+            return no_type;
+        }
+        if (!writable_target(checker, node.a)) {
+            return fail(checker, node.a, "address-of requires writable storage");
+        }
+        return pointer_to(checker, id, operand);
+    }
+    case AST_DEREFERENCE: {
+        SemaType operand = value(checker, node.a, no_type);
+        if (operand.kind != TYPE_POINTER) {
+            return fail(checker, id, "dereference requires a pointer");
+        }
+        return checker->sema->pointees[operand.pointee];
+    }
     case AST_POSITIVE:
     case AST_NEGATE:
     case AST_LOGICAL_NOT:
@@ -883,6 +952,7 @@ void sema_destroy(Sema *sema)
 {
     free(sema->nodes);
     free(sema->functions);
+    free(sema->pointees);
     *sema = (Sema){0};
 }
 

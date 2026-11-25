@@ -8,7 +8,7 @@ typedef enum {
     TYPE_INVALID, TYPE_VOID, TYPE_BOOL,
     TYPE_I8, TYPE_I16, TYPE_I32, TYPE_I64,
     TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64,
-    TYPE_F32, TYPE_F64, TYPE_STRUCT, TYPE_ARRAY, TYPE_SLICE,
+    TYPE_F32, TYPE_F64, TYPE_STRUCT, TYPE_ARRAY, TYPE_SLICE, TYPE_POINTER,
 } TypeKind;
 
 typedef struct {
@@ -17,6 +17,7 @@ typedef struct {
     TypeKind element;  // Element type for arrays and slices.
     uint32_t record;       // Index in Ast.structs for a struct or a collection of one.
     uint32_t record_size;  // Size including alignment padding.
+    uint32_t pointee;      // Index in Sema.pointees for a pointer or a collection of pointers.
 } SemaType;
 
 typedef struct {
@@ -36,6 +37,8 @@ typedef struct {
 typedef struct {
     SemaNode *nodes;          // Indexed by AstNodeId.
     SemaFunction *functions;  // Indexed like Ast.functions.
+    SemaType *pointees;
+    uint32_t pointee_count;
 } Sema;
 
 typedef struct {

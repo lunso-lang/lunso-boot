@@ -331,9 +331,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         return emit_value(lowering, IR_BYTES, info.type, ast->positions[id], data.a, 0);
     case AST_ARRAY_LITERAL: {
         uint32_t address = emit_value(lowering, IR_STORAGE_ALLOC, info.type, 0, 0, 0);
-        SemaType elem_type = {.kind = info.type.element, .record = info.type.record,
-                              .record_size = info.type.record_size, .pointee = info.type.pointee,
-                              .read_only = info.type.read_only};
+        SemaType elem_type = lowering->sema->elements[info.type.element_type];
         for (uint32_t i = 0; i < data.b && !lowering->failed; i++) {
             uint32_t idx = emit_value(lowering, IR_IMMEDIATE, (SemaType){.kind = TYPE_I64}, i, 0, 0);
             uint32_t elem_addr = emit_value(lowering, IR_ELEMENT_ADDRESS, info.type, address, idx, 0);

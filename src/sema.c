@@ -30,6 +30,7 @@ typedef struct {
     SemaType *const_types;
     uint8_t *const_state;
     uint32_t pointee_capacity;
+    uint32_t element_capacity;
     Local *locals;
     size_t local_count;
     size_t local_capacity;
@@ -80,7 +81,16 @@ uint32_t sema_scalar_size(TypeKind type)
 
 uint32_t sema_element_size(SemaType type)
 {
-    return type.element == TYPE_STRUCT ? type.record_size : sema_scalar_size(type.element);
+    if (type.element_size) {
+        return type.element_size;
+    }
+    if (type.element == TYPE_STRUCT) {
+        return type.record_size;
+    }
+    if (type.element == TYPE_SLICE) {
+        return 2 * sema_scalar_size(TYPE_POINTER);
+    }
+    return sema_scalar_size(type.element);
 }
 
 uint32_t sema_storage_size(SemaType type)
@@ -184,7 +194,8 @@ static TypeKind common_numeric_type(TypeKind left, TypeKind right)
 static bool same_type(SemaType a, SemaType b)
 {
     return a.kind == b.kind && a.length == b.length && a.element == b.element &&
-           a.record == b.record && a.pointee == b.pointee && a.read_only == b.read_only;
+           a.element_type == b.element_type && a.record == b.record &&
+           a.pointee == b.pointee && a.read_only == b.read_only;
 }
 
 static bool is_array_like(TypeKind type)
@@ -192,11 +203,68 @@ static bool is_array_like(TypeKind type)
     return type == TYPE_ARRAY || type == TYPE_SLICE;
 }
 
-static SemaType element_type(SemaType collection)
+static SemaType element_type(const Checker *checker, SemaType collection)
 {
-    return (SemaType){.kind = collection.element, .record = collection.record,
-                      .record_size = collection.record_size, .pointee = collection.pointee,
-                      .read_only = collection.read_only};
+    return checker->sema->elements[collection.element_type];
+}
+
+static uint32_t type_byte_size(SemaType type)
+{
+    if (type.kind == TYPE_STRUCT || type.kind == TYPE_ARRAY) {
+        return sema_storage_size(type);
+    }
+    if (type.kind == TYPE_SLICE) {
+        return 2 * sema_scalar_size(TYPE_POINTER);
+    }
+    return sema_scalar_size(type.kind);
+}
+
+static SemaType make_collection(Checker *checker, AstNodeId id, TypeKind kind,
+                                uint32_t length, SemaType element)
+{
+    if (failed(checker)) {
+        return no_type;
+    }
+    Sema *sema = checker->sema;
+    uint32_t index = UINT32_MAX;
+    for (uint32_t i = 0; i < sema->element_count; i++) {
+        if (same_type(sema->elements[i], element)) {
+            index = i;
+            break;
+        }
+    }
+    if (index == UINT32_MAX) {
+        if (sema->element_count == checker->element_capacity) {
+            uint32_t capacity = checker->element_capacity;
+            if (capacity > UINT32_MAX / 2) {
+                return fail(checker, id, "could not allocate collection type storage");
+            }
+            capacity = capacity ? capacity * 2 : 16;
+            size_t item_size = sizeof(*sema->elements);
+            if (capacity > SIZE_MAX / item_size) {
+                return fail(checker, id, "could not allocate collection type storage");
+            }
+            SemaType *elements = realloc(sema->elements, capacity * item_size);
+            if (!elements) {
+                return fail(checker, id, "could not allocate collection type storage");
+            }
+            sema->elements = elements;
+            checker->element_capacity = capacity;
+        }
+        index = sema->element_count++;
+        sema->elements[index] = element;
+    }
+    return (SemaType){
+        .kind = kind,
+        .length = length,
+        .element = element.kind,
+        .element_type = index,
+        .element_size = type_byte_size(element),
+        .record = element.record,
+        .record_size = element.record_size,
+        .pointee = element.pointee,
+        .read_only = element.read_only,
+    };
 }
 
 static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee, bool read_only)
@@ -204,7 +272,7 @@ static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee, boo
     if (failed(checker)) {
         return no_type;
     }
-    if (is_array_like(pointee.kind)) {
+    if (pointee.kind == TYPE_ARRAY) {
         return fail(checker, id, "take the address of an array element instead");
     }
     SemaType result = {.kind = TYPE_POINTER, .read_only = read_only};
@@ -420,51 +488,72 @@ static void layout_struct(Checker *checker, uint32_t index)
             width = sema_scalar_size(TYPE_POINTER);
             field_align = width;
         } else if (annotation_kind == AST_ARRAY_TYPE) {
-            AstNodeData arr = ast->data[annotation];
-            if (!arr.b) {
-                fail(checker, annotation, "struct fields cannot be slices");
-                checker->module = saved_module;
-                return;
+            AstNodeId leaf = annotation;
+            while (ast->kinds[leaf] == AST_ARRAY_TYPE && ast->data[leaf].b != AST_NODE_NONE) {
+                leaf = ast->data[leaf].a;
             }
-            AstKind elem_kind = ast->kinds[arr.a];
-            SemaType element = {.kind = TYPE_POINTER};
-            uint32_t elem_size = sema_scalar_size(TYPE_POINTER);
-            uint32_t elem_align = elem_size;
-            if (elem_kind != AST_POINTER_TYPE) {
-                element = resolve_type(checker, arr.a);
-                if (element.kind == TYPE_INVALID || failed(checker)) {
-                    checker->module = saved_module;
-                    return;
-                }
-                if (is_array_like(element.kind) || element.kind == TYPE_VOID) {
-                    fail(checker, arr.a, "collection elements must have a scalar or struct type");
-                    checker->module = saved_module;
-                    return;
-                }
-                if (element.kind == TYPE_STRUCT) {
-                    layout_struct(checker, element.record);
+            bool deferred_pointer = ast->kinds[leaf] == AST_POINTER_TYPE ||
+                                    (ast->kinds[leaf] == AST_ARRAY_TYPE &&
+                                     ast->kinds[ast->data[leaf].a] == AST_POINTER_TYPE);
+            if (!deferred_pointer) {
+                if (ast->kinds[leaf] == AST_TYPE_NAME || ast->kinds[leaf] == AST_QUALIFIED_TYPE) {
+                    SemaType leaf_type = resolve_type(checker, leaf);
                     if (failed(checker)) {
                         checker->module = saved_module;
                         return;
                     }
-                    element.record_size = checker->struct_sizes[element.record];
-                    elem_size = element.record_size;
-                    elem_align = checker->struct_alignments[element.record];
-                } else {
-                    elem_size = sema_scalar_size(element.kind);
-                    elem_align = elem_size;
+                    if (leaf_type.kind == TYPE_STRUCT) {
+                        layout_struct(checker, leaf_type.record);
+                        if (failed(checker)) {
+                            checker->module = saved_module;
+                            return;
+                        }
+                    }
                 }
+                type = resolve_type(checker, annotation);
+                if (type.kind == TYPE_INVALID || failed(checker)) {
+                    checker->module = saved_module;
+                    return;
+                }
+                width = type_byte_size(type);
+                if (ast->kinds[leaf] == AST_ARRAY_TYPE) {
+                    field_align = sema_scalar_size(TYPE_POINTER);
+                } else {
+                    SemaType leaf_type = resolve_type(checker, leaf);
+                    field_align = leaf_type.kind == TYPE_STRUCT
+                                  ? checker->struct_alignments[leaf_type.record]
+                                  : sema_scalar_size(leaf_type.kind);
+                }
+            } else {
+                uint64_t total_count = 1;
+                AstNodeId cur = annotation;
+                while (ast->kinds[cur] == AST_ARRAY_TYPE && ast->data[cur].b != AST_NODE_NONE) {
+                    uint32_t len = 0;
+                    uint32_t ptr_size = sema_scalar_size(TYPE_POINTER);
+                    if (!resolve_array_length(checker, ast->data[cur].b, ptr_size, &len)) {
+                        checker->module = saved_module;
+                        return;
+                    }
+                    if (total_count > (INT32_MAX - 7u) / (len ? len : 1)) {
+                        fail(checker, cur, "array is too large for local storage");
+                        checker->module = saved_module;
+                        return;
+                    }
+                    total_count *= len;
+                    cur = ast->data[cur].a;
+                }
+                uint32_t leaf_size = ast->kinds[cur] == AST_ARRAY_TYPE
+                                     ? 2 * sema_scalar_size(TYPE_POINTER)
+                                     : sema_scalar_size(TYPE_POINTER);
+                if (total_count > (INT32_MAX - 7u) / leaf_size) {
+                    fail(checker, annotation, "array is too large for local storage");
+                    checker->module = saved_module;
+                    return;
+                }
+                type = (SemaType){.kind = ast->data[annotation].b ? TYPE_ARRAY : TYPE_SLICE};
+                width = (uint32_t)(total_count * leaf_size);
+                field_align = sema_scalar_size(TYPE_POINTER);
             }
-            uint32_t length = 0;
-            if (!resolve_array_length(checker, arr.b, elem_size, &length)) {
-                checker->module = saved_module;
-                return;
-            }
-            type = (SemaType){.kind = TYPE_ARRAY, .length = length, .element = element.kind,
-                              .record = element.record, .record_size = element.record_size,
-                              .pointee = element.pointee, .read_only = element.read_only};
-            width = length * elem_size;
-            field_align = elem_align;
         } else {
             type = resolve_type(checker, annotation);
             if (type.kind == TYPE_INVALID || failed(checker)) {
@@ -536,24 +625,20 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         if (failed(checker)) {
             return no_type;
         }
-        if (is_array_like(element.kind)) {
-            return fail(checker, data.a, "collection elements must have a scalar or struct type");
+        if (element.kind == TYPE_VOID || element.kind == TYPE_INVALID) {
+            return fail(checker, data.a, "collection elements cannot have void type");
         }
-        SemaType collection = {.kind = TYPE_SLICE, .element = element.kind,
-                               .record = element.record, .record_size = element.record_size,
-                               .pointee = element.pointee, .read_only = element.read_only};
-        if (!data.b) {
+        SemaType collection = make_collection(checker, id, TYPE_SLICE, 0, element);
+        if (!data.b || failed(checker)) {
             return collection;
         }
 
         uint32_t elem_size = sema_element_size(collection);
         uint32_t length = 0;
-        if (!elem_size || !resolve_array_length(checker, data.b, elem_size, &length)) {
+        if (elem_size && !resolve_array_length(checker, data.b, elem_size, &length)) {
             return no_type;
         }
-        collection.kind = TYPE_ARRAY;
-        collection.length = length;
-        return collection;
+        return make_collection(checker, id, TYPE_ARRAY, length, element);
     }
     AstSpan name = node_span(checker->ast, id);
     const AstBinding *import = ast_imported(checker->ast, checker->module, name);
@@ -587,9 +672,11 @@ static void resolve_pointer_fields(Checker *checker, AstStruct record)
     for (uint32_t i = 0; i < record.fields.count && !failed(checker); i++) {
         AstNodeId field = ast->children[record.fields.first + i];
         AstNodeId annotation = ast->data[field].b;
-        if (ast->kinds[annotation] == AST_POINTER_TYPE ||
-            (ast->kinds[annotation] == AST_ARRAY_TYPE &&
-             ast->kinds[ast->data[annotation].a] == AST_POINTER_TYPE)) {
+        AstNodeId leaf = annotation;
+        while (ast->kinds[leaf] == AST_ARRAY_TYPE) {
+            leaf = ast->data[leaf].a;
+        }
+        if (ast->kinds[leaf] == AST_POINTER_TYPE) {
             checker->sema->nodes[field].type = resolve_type(checker, annotation);
         }
     }
@@ -749,8 +836,7 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
         return no_type;
     }
     if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE &&
-        type.element == expected.element && type.record == expected.record &&
-        type.pointee == expected.pointee && type.read_only == expected.read_only) {
+        type.element_type == expected.element_type) {
         checker->sema->nodes[id].borrow_array = true;
         return expected;
     }
@@ -906,7 +992,7 @@ static SemaType string_literal(Checker *checker, AstNodeId id)
             return no_type;
         }
     }
-    return (SemaType){.kind = TYPE_ARRAY, .length = length, .element = TYPE_U8};
+    return make_collection(checker, id, TYPE_ARRAY, length, (SemaType){.kind = TYPE_U8});
 }
 
 static SemaType check_identifier(Checker *checker, AstNodeId id)
@@ -955,7 +1041,7 @@ static SemaType check_collection_builtin(Checker *checker, AstNodeId id, SemaBui
     }
     checker->sema->nodes[id].builtin = builtin;
     return length ? (SemaType){.kind = TYPE_I64}
-                  : pointer_to(checker, id, element_type(operand), true);
+                  : pointer_to(checker, id, element_type(checker, operand), true);
 }
 
 static SemaType check_size_of(Checker *checker, AstNodeId id)
@@ -1433,9 +1519,9 @@ static SemaType check_array_literal(Checker *checker, AstNodeId id, SemaType exp
         if (count != expected.length) {
             return fail(checker, id, "array initializer length mismatch");
         }
-        elem_expected = element_type(expected);
+        elem_expected = element_type(checker, expected);
     } else if (expected.kind == TYPE_SLICE) {
-        elem_expected = element_type(expected);
+        elem_expected = element_type(checker, expected);
     }
 
     SemaType elem_type;
@@ -1449,18 +1535,16 @@ static SemaType check_array_literal(Checker *checker, AstNodeId id, SemaType exp
         if (failed(checker)) {
             return no_type;
         }
-        if (is_array_like(elem_type.kind) || elem_type.kind == TYPE_VOID) {
+        if (elem_type.kind == TYPE_VOID) {
             return fail(checker, ast->children[node.a],
-                        "collection elements must have a scalar or struct type");
+                        "collection elements cannot have void type");
         }
         for (uint32_t i = 1; i < count && !failed(checker); i++) {
             value(checker, ast->children[node.a + i], elem_type);
         }
     }
 
-    SemaType result = {.kind = TYPE_ARRAY, .length = count, .element = elem_type.kind,
-                       .record = elem_type.record, .record_size = elem_type.record_size,
-                       .pointee = elem_type.pointee, .read_only = elem_type.read_only};
+    SemaType result = make_collection(checker, id, TYPE_ARRAY, count, elem_type);
     uint32_t elem_size = sema_element_size(result);
     if (elem_size && count > (INT32_MAX - 7u) / elem_size) {
         return fail(checker, id, "array is too large for local storage");
@@ -1493,7 +1577,8 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if ((!is_array_like(base.kind) && base.kind != TYPE_POINTER) || !is_plain_integer(index)) {
             return fail(checker, id, "indexing requires an array, slice, or pointer and an integer index");
         }
-        return base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee] : element_type(base);
+        return base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee]
+                                         : element_type(checker, base);
     }
     case AST_SLICE: {
         SemaType base = value(checker, node.a, no_type);
@@ -1508,10 +1593,8 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
             return no_type;
         }
         SemaType element = base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee]
-                                                     : element_type(base);
-        return (SemaType){.kind = TYPE_SLICE, .element = element.kind, .record = element.record,
-                          .record_size = element.record_size, .pointee = element.pointee,
-                          .read_only = element.read_only};
+                                                     : element_type(checker, base);
+        return make_collection(checker, id, TYPE_SLICE, 0, element);
     }
     case AST_MEMBER:
         return check_member(checker, id);
@@ -1762,6 +1845,7 @@ void sema_destroy(Sema *sema)
     free(sema->nodes);
     free(sema->functions);
     free(sema->pointees);
+    free(sema->elements);
     free(sema->enum_values);
     free(sema->const_values);
     free(sema->const_strings);

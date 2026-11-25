@@ -1,8 +1,0 @@
-// expect-stderr: struct fields cannot be slices
-struct Bad {
-    s: []u8
-}
-
-fun main(): i32 {
-    return 0
-}

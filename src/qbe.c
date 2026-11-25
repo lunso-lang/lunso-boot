@@ -217,17 +217,44 @@ static char memory_suffix(TypeKind type)
     return size == 1 ? 'b' : size == 2 ? 'h' : types[type].base;
 }
 
+static uint32_t value_size(SemaType type)
+{
+    if (type.kind == TYPE_STRUCT || type.kind == TYPE_ARRAY) {
+        return sema_storage_size(type);
+    }
+    if (type.kind == TYPE_SLICE) {
+        return 2 * sema_scalar_size(TYPE_POINTER);
+    }
+    return sema_scalar_size(type.kind);
+}
+
 static void write_load(FILE *out, TypeKind kind, uint32_t result, const char *name, uint32_t address)
 {
+    if (kind == TYPE_SLICE) {
+        fprintf(out, "\t%%v%" PRIu32 " =l loadl %%%s%" PRIu32 "\n", result, name, address);
+        fprintf(out, "\t%%slen_addr%" PRIu32 " =l add %%%s%" PRIu32 ", 8\n", result, name, address);
+        fprintf(out, "\t%%len%" PRIu32 " =l loadl %%slen_addr%" PRIu32 "\n", result, result);
+        return;
+    }
     QbeType type = types[kind];
     const char *sign = type.extend ? (is_signed(kind) ? "s" : "u") : "";
     fprintf(out, "\t%%v%" PRIu32 " =%c load%s%c %%%s%" PRIu32 "\n",
             result, type.base, sign, memory_suffix(kind), name, address);
 }
 
-static void write_store(FILE *out, TypeKind kind, const char *value_name, uint32_t value,
-                        const char *address_name, uint32_t address)
+static void write_store(FILE *out, TypeKind kind, const char *value_name, const char *len_name,
+                        uint32_t value, const char *address_name, uint32_t address,
+                        const char *tmp_prefix, uint32_t tmp_id)
 {
+    if (kind == TYPE_SLICE) {
+        fprintf(out, "\tstorel %%%s%" PRIu32 ", %%%s%" PRIu32 "\n",
+                value_name, value, address_name, address);
+        fprintf(out, "\t%%s%s%" PRIu32 " =l add %%%s%" PRIu32 ", 8\n",
+                tmp_prefix, tmp_id, address_name, address);
+        fprintf(out, "\tstorel %%%s%" PRIu32 ", %%s%s%" PRIu32 "\n",
+                len_name, value, tmp_prefix, tmp_id);
+        return;
+    }
     fprintf(out, "\tstore%c %%%s%" PRIu32 ", %%%s%" PRIu32 "\n",
             memory_suffix(kind), value_name, value, address_name, address);
 }
@@ -360,7 +387,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         break;
     case IR_STORE:
         if (addressed && addressed[inst.a] != TYPE_INVALID) {
-            write_store(out, inst.type.kind, "v", inst.b, "local", inst.a);
+            write_store(out, inst.type.kind, "v", "len", inst.b, "local", inst.a, "store", index);
             break;
         }
         fprintf(out, "\t%%s%" PRIu32 " =%c copy %%v%" PRIu32 "\n",
@@ -390,8 +417,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         write_access(out, inst);
         break;
     case IR_POINTER_INDEX:
-        write_index_address(out, inst, inst.type.kind == TYPE_STRUCT ? inst.type.record_size
-                                                                     : sema_scalar_size(inst.type.kind));
+        write_index_address(out, inst, value_size(inst.type));
         break;
     case IR_FIELD_ADDRESS:
         fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %" PRIu32 "\n",
@@ -408,7 +434,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         write_load(out, inst.type.kind, inst.result, "v", inst.a);
         break;
     case IR_MEMORY_STORE:
-        write_store(out, inst.type.kind, "v", inst.b, "v", inst.a);
+        write_store(out, inst.type.kind, "v", "len", inst.b, "v", inst.a, "mem", index);
         break;
     case IR_LEN:
         fprintf(out, "\t%%v%" PRIu32 " =l copy ", inst.result);
@@ -503,15 +529,18 @@ static bool write_function(FILE *out, const IrModule *module, uint32_t index)
             if (addressed) {
                 for (uint32_t slot = 0; slot < fn.slot_count; slot++) {
                     if (addressed[slot] != TYPE_INVALID) {
+                        uint32_t bytes = addressed[slot] == TYPE_SLICE
+                                         ? 2 * sema_scalar_size(TYPE_POINTER)
+                                         : sema_scalar_size(addressed[slot]);
                         fprintf(out, "\t%%local%" PRIu32 " =l alloc8 %" PRIu32 "\n",
-                                slot, sema_scalar_size(addressed[slot]));
+                                slot, bytes);
                     }
                 }
             }
             for (uint32_t p = 0; p < fn.parameter_count; p++) {
                 TypeKind kind = module->parameters[fn.first_parameter + p].kind;
                 if (addressed && addressed[p] != TYPE_INVALID) {
-                    write_store(out, kind, "p", p, "local", p);
+                    write_store(out, kind, "p", "plen", p, "local", p, "arg", p);
                     continue;
                 }
                 QbeType type = types[kind];

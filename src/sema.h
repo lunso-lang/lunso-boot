@@ -15,6 +15,8 @@ typedef struct {
     TypeKind kind;
     uint32_t length;  // Number of elements for fixed arrays.
     TypeKind element;  // Element type for arrays and slices.
+    uint32_t element_type;  // Index in Sema.elements for arrays and slices.
+    uint32_t element_size;  // Byte size of one element for arrays and slices.
     uint32_t record;       // Struct index, or one-based enum index for an integer representation.
     uint32_t record_size;  // Size including alignment padding.
     uint32_t pointee;      // Index in Sema.pointees for a pointer or a collection of pointers.
@@ -44,10 +46,12 @@ typedef struct {
     SemaNode *nodes;          // Indexed by AstNodeId.
     SemaFunction *functions;  // Indexed like Ast.functions.
     SemaType *pointees;
+    SemaType *elements;
     uint64_t *enum_values;
     uint64_t *const_values;
     AstNodeId *const_strings;
     uint32_t pointee_count;
+    uint32_t element_count;
 } Sema;
 
 typedef struct {

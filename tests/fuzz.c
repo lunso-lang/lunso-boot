@@ -145,6 +145,7 @@ static void emit_type(StrBuf *sb)
     static const char *const types[] = {
         "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
         "f32", "f64", "bool", "*u8", "*const u8", "[]u8", "[4]i32",
+        "[2][2]i32", "[][]u8", "[2][]u8",
     };
     sb_append(sb, "%s", types[rng_range(sizeof(types) / sizeof(types[0]))]);
 }

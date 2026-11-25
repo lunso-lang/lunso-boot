@@ -69,6 +69,8 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         [TOKEN_IF] = "IF",
         [TOKEN_ELSE] = "ELSE",
         [TOKEN_FOR] = "FOR",
+        [TOKEN_BREAK] = "BREAK",
+        [TOKEN_CONTINUE] = "CONTINUE",
         [TOKEN_VAR] = "VAR",
         [TOKEN_IDENTIFIER] = "IDENTIFIER",
         [TOKEN_INTEGER] = "INTEGER",

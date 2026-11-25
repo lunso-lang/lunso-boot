@@ -38,6 +38,8 @@ enum {
     AST_IF,      // a: condition node, b: if_branches index
     AST_FOR,          // a: condition node or AST_NODE_NONE, b: body block
     AST_FOR_C_STYLE,  // a: for_headers index, b: body block
+    AST_BREAK,
+    AST_CONTINUE,
     AST_VAR,          // a: variables index, position: variable name
 
     AST_IDENTIFIER,  // a: name length

@@ -507,6 +507,12 @@ static AstNodeId parse_statement(Parser *parser)
         return parse_if(parser);
     case TOKEN_FOR:
         return parse_for(parser);
+    case TOKEN_BREAK:
+        advance(parser);
+        return add_node(parser, AST_BREAK, token, 0, 0);
+    case TOKEN_CONTINUE:
+        advance(parser);
+        return add_node(parser, AST_CONTINUE, token, 0, 0);
     case TOKEN_VAR:
         return parse_variable(parser);
     case TOKEN_RETURN: {

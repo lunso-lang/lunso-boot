@@ -11,6 +11,8 @@ typedef struct {
     uint32_t argument_capacity;
     uint32_t next_value;
     uint32_t next_label;
+    uint32_t loop_break;
+    uint32_t loop_continue;
     bool failed;
 } Lowering;
 
@@ -413,22 +415,29 @@ static void lower_loop(Lowering *lowering, AstNodeId id)
     uint32_t start = label(lowering);
     jump(lowering, start);
     emit_label(lowering, start);
-    uint32_t end = 0;
+    uint32_t end = label(lowering);
+    uint32_t continue_target = header.step ? label(lowering) : start;
     if (header.condition) {
         uint32_t condition = lower_expression(lowering, header.condition);
         uint32_t body = label(lowering);
-        end = label(lowering);
         branch(lowering, condition, body, end);
         emit_label(lowering, body);
     }
+    uint32_t saved_break = lowering->loop_break;
+    uint32_t saved_continue = lowering->loop_continue;
+    lowering->loop_break = end;
+    lowering->loop_continue = continue_target;
     lower_statement(lowering, data.b);
-    if (lowering->sema->nodes[data.b].falls_through) {
-        if (header.step) {
-            lower_expression(lowering, header.step);
-        }
+    lowering->loop_break = saved_break;
+    lowering->loop_continue = saved_continue;
+    if (header.step) {
+        emit_label(lowering, continue_target);
+        lower_expression(lowering, header.step);
+        jump(lowering, start);
+    } else if (lowering->sema->nodes[data.b].falls_through) {
         jump(lowering, start);
     }
-    if (header.condition) {
+    if (header.condition || lowering->sema->nodes[id].falls_through) {
         emit_label(lowering, end);
     }
 }
@@ -461,6 +470,12 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
     case AST_FOR:
     case AST_FOR_C_STYLE:
         lower_loop(lowering, id);
+        break;
+    case AST_BREAK:
+        jump(lowering, lowering->loop_break);
+        break;
+    case AST_CONTINUE:
+        jump(lowering, lowering->loop_continue);
         break;
     case AST_VAR: {
         SemaNode info = lowering->sema->nodes[id];

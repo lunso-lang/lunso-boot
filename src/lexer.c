@@ -79,6 +79,8 @@ static TokenKind scan_identifier(Lexer *lexer, size_t start)
         {"if", TOKEN_IF},
         {"else", TOKEN_ELSE},
         {"for", TOKEN_FOR},
+        {"break", TOKEN_BREAK},
+        {"continue", TOKEN_CONTINUE},
         {"var", TOKEN_VAR},
     };
 

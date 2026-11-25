@@ -204,10 +204,13 @@ static AstNodeId parse_call(Parser *parser, AstNodeId callee)
     uint32_t mark = parser->builder.pending_count;
     push_child(parser, callee);
     open_group(parser);
-    if (parser->current.kind != TOKEN_RIGHT_PAREN) {
-        do {
-            push_child(parser, parse_expression(parser, PREC_ASSIGNMENT));
-        } while (match(parser, TOKEN_COMMA) && parser->current.kind != TOKEN_RIGHT_PAREN);
+    while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_PAREN &&
+           parser->current.kind != TOKEN_EOF) {
+        push_child(parser, parse_expression(parser, PREC_ASSIGNMENT));
+        if (parser->current.kind == TOKEN_RIGHT_PAREN || parser->current.kind == TOKEN_EOF) {
+            break;
+        }
+        expect(parser, TOKEN_COMMA, "expected ',' or ')' after argument");
     }
     close_group(parser, TOKEN_RIGHT_PAREN, "expected ')' after arguments");
     AstNodeRange items = finish_children(parser, mark);

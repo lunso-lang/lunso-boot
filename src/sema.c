@@ -18,6 +18,8 @@ typedef struct {
     uint32_t *function_map;
     size_t function_capacity;
     uint32_t *struct_sizes;
+    uint32_t *struct_alignments;
+    uint8_t *struct_state;
     uint32_t pointee_capacity;
     Local *locals;
     size_t local_count;
@@ -295,18 +297,32 @@ static uint64_t align_bytes(uint64_t size, uint32_t alignment)
     return (size + alignment - 1) & ~((uint64_t)alignment - 1);
 }
 
+enum { STRUCT_UNVISITED = 0, STRUCT_VISITING = 1, STRUCT_DONE = 2 };
+
 static void layout_struct(Checker *checker, uint32_t index)
 {
+    if (checker->struct_state[index] == STRUCT_DONE) {
+        return;
+    }
     const Ast *ast = checker->ast;
     AstStruct record = ast->structs[index];
+    if (checker->struct_state[index] == STRUCT_VISITING) {
+        fail_at(checker, record.name.offset, "recursive struct definition");
+        return;
+    }
+    checker->struct_state[index] = STRUCT_VISITING;
+
+    uint32_t saved_module = checker->module;
     checker->module = record.module;
     if (scalar_type(ast, record.name) != TYPE_INVALID ||
         find_struct(ast, record.module, record.name) != index) {
         fail_at(checker, record.name.offset, "duplicate or reserved struct name");
+        checker->module = saved_module;
         return;
     }
     if (!record.fields.count) {
         fail_at(checker, record.name.offset, "struct must have at least one field");
+        checker->module = saved_module;
         return;
     }
 
@@ -319,6 +335,7 @@ static void layout_struct(Checker *checker, uint32_t index)
         for (uint32_t j = 0; j < i; j++) {
             if (same_name(ast, name, node_span(ast, fields[j]))) {
                 fail(checker, field, "duplicate field name");
+                checker->module = saved_module;
                 return;
             }
         }
@@ -326,32 +343,53 @@ static void layout_struct(Checker *checker, uint32_t index)
         AstKind annotation_kind = ast->kinds[annotation];
         if (annotation_kind != AST_TYPE_NAME && annotation_kind != AST_POINTER_TYPE &&
             annotation_kind != AST_QUALIFIED_TYPE) {
-            fail(checker, annotation, "struct fields must be scalar");
+            fail(checker, annotation, "struct fields must be scalar or struct");
+            checker->module = saved_module;
             return;
         }
         SemaType type = annotation_kind == AST_POINTER_TYPE ? (SemaType){.kind = TYPE_POINTER}
                                                             : resolve_type(checker, annotation);
         if (type.kind == TYPE_INVALID || failed(checker)) {
+            checker->module = saved_module;
             return;
         }
-        uint32_t width = sema_scalar_size(type.kind);
-        if (!width) {
-            fail(checker, annotation, "struct fields must be scalar");
-            return;
+        uint32_t width = 0;
+        uint32_t field_align = 1;
+        if (type.kind == TYPE_STRUCT) {
+            layout_struct(checker, type.record);
+            if (failed(checker)) {
+                checker->module = saved_module;
+                return;
+            }
+            type.record_size = checker->struct_sizes[type.record];
+            width = type.record_size;
+            field_align = checker->struct_alignments[type.record];
+        } else {
+            width = sema_scalar_size(type.kind);
+            if (!width) {
+                fail(checker, annotation, "struct fields must be scalar or struct");
+                checker->module = saved_module;
+                return;
+            }
+            field_align = width;
         }
-        size = align_bytes(size, width);
+        size = align_bytes(size, field_align);
         if (size + width > INT32_MAX - 7u) {
             fail(checker, field, "struct is too large for local storage");
+            checker->module = saved_module;
             return;
         }
         checker->sema->nodes[field].type = type;
         checker->sema->nodes[field].binding = (uint32_t)size;
         size += width;
-        if (width > alignment) {
-            alignment = width;
+        if (field_align > alignment) {
+            alignment = field_align;
         }
     }
+    checker->struct_alignments[index] = alignment;
     checker->struct_sizes[index] = (uint32_t)align_bytes(size, alignment);
+    checker->struct_state[index] = STRUCT_DONE;
+    checker->module = saved_module;
 }
 
 static SemaType resolve_type(Checker *checker, AstNodeId id)
@@ -1541,6 +1579,8 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     }
     if (ast->struct_count) {
         checker.struct_sizes = calloc(ast->struct_count, sizeof(*checker.struct_sizes));
+        checker.struct_alignments = calloc(ast->struct_count, sizeof(*checker.struct_alignments));
+        checker.struct_state = calloc(ast->struct_count, sizeof(*checker.struct_state));
     }
     size_t enum_value_count = 0;
     for (uint32_t i = 0; i < ast->enum_count; i++) {
@@ -1550,7 +1590,8 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
         out->enum_values = calloc(enum_value_count, sizeof(*out->enum_values));
     }
     if (!out->nodes || (ast->function_count && !out->functions) ||
-        (ast->struct_count && !checker.struct_sizes) || (enum_value_count && !out->enum_values)) {
+        (ast->struct_count && (!checker.struct_sizes || !checker.struct_alignments || !checker.struct_state)) ||
+        (enum_value_count && !out->enum_values)) {
         fail_at(&checker, 0, "could not allocate semantic analysis storage");
     }
     uint32_t next_value = 0;
@@ -1572,6 +1613,8 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     free(checker.locals);
     free(checker.function_map);
     free(checker.struct_sizes);
+    free(checker.struct_alignments);
+    free(checker.struct_state);
     if (failed(&checker)) {
         *error = checker.error;
         sema_destroy(out);

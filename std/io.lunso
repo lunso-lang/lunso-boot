@@ -1,0 +1,37 @@
+ext fun lunso_sys_read(fd: i32, buffer: *u8, count: u64): i64
+ext fun lunso_sys_write(fd: i32, buffer: *const u8, count: u64): i64
+
+pub fun read_into(buffer: *u8, capacity: u64): i64 {
+    return lunso_sys_read(0, buffer, capacity)
+}
+
+pub fun write_bytes(fd: i32, bytes: []u8): i64 {
+    return lunso_sys_write(fd, data(bytes), len(bytes) as u64)
+}
+
+pub fun print(text: []u8): i64 {
+    var written: i64 = 0
+    for written < len(text) {
+        var count: i64 = write_bytes(1, text[written..len(text)])
+        if count < 0 {
+            return count
+        }
+        if count == 0 {
+            return written
+        }
+        written += count
+    }
+    return written
+}
+
+pub fun println(text: []u8): i64 {
+    var written: i64 = print(text)
+    if written != len(text) {
+        return written
+    }
+    var newline: i64 = print("\n")
+    if newline < 0 {
+        return newline
+    }
+    return written + newline
+}

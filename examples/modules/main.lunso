@@ -1,6 +1,6 @@
-import std.*
+import support.*
 import json.io as json_io
-import std.io { Counter, value as counter_value }
+import support.io { Counter, value as counter_value }
 
 ext fun putchar(character: i32): i32
 

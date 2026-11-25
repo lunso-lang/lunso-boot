@@ -25,9 +25,9 @@ existing directory for a single invocation.
 ```
 
 ```lunso
-import std.*
+import support.*
 import json.io as json_io
-import std.io { Counter, value as counter_value }
+import support.io { Counter, value as counter_value }
 ```
 
 A wildcard brings public declarations and direct child modules into scope.
@@ -48,3 +48,17 @@ cc -c examples/link/linux_x86_64.s -o build/linux_x86_64.o
 ./build/lunso --build examples/link/main.lunso -o build/link-demo --link build/linux_x86_64.o
 ./build/link-demo
 ```
+
+On Linux x86-64, `std.io` uses direct syscalls from `build/std-linux-x86_64.o`.
+`print` and `println` write to standard output. `write_bytes` takes a file
+descriptor, and `read_into` reads standard input into a caller-supplied buffer.
+The functions return the number of bytes transferred or a negative error code.
+
+```sh
+make build/lunso build/std-linux-x86_64.o
+./build/lunso --build examples/io.lunso -o build/io-demo --link build/std-linux-x86_64.o
+./build/io-demo
+```
+
+Use `data(array_or_slice)` to borrow a read-only pointer to the first element.
+For example, the result for `[]u8` has type `*const u8`.

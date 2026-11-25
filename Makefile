@@ -15,6 +15,10 @@ build/lunso: $(SOURCES) $(HEADERS) build/std_path.h
 	mkdir -p build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -include build/std_path.h $(LDFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
+build/std-linux-x86_64.o: std/platform/linux_x86_64.s
+	mkdir -p build
+	$(CC) $(ASFLAGS) -c $< -o $@
+
 build/std_path.h: force
 	@mkdir -p build
 	@set -e; std_dir=$(call shell_quote,$(STD_DIR)); \
@@ -25,4 +29,4 @@ build/std_path.h: force
 	if ! cmp -s "$$tmp" "$@"; then mv "$$tmp" "$@"; fi
 
 clean:
-	rm -f build/lunso build/std_path.h
+	rm -f build/lunso build/std_path.h build/std-linux-x86_64.o

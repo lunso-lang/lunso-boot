@@ -15,6 +15,30 @@ lunso_sys_write:
     ret
 .size lunso_sys_write, .-lunso_sys_write
 
+.globl lunso_sys_file_open
+.type lunso_sys_file_open, @function
+lunso_sys_file_open:
+    mov $02000000, %edx     # O_CLOEXEC | O_RDONLY
+    test %sil, %sil
+    jz .Lfile_open
+    or $01101, %edx         # O_WRONLY | O_CREAT | O_TRUNC
+.Lfile_open:
+    mov %rdi, %rsi          # path
+    mov $-100, %edi         # AT_FDCWD
+    mov $0666, %r10d        # creation mode, filtered by umask
+    mov $257, %eax          # openat
+    syscall
+    ret
+.size lunso_sys_file_open, .-lunso_sys_file_open
+
+.globl lunso_sys_file_close
+.type lunso_sys_file_close, @function
+lunso_sys_file_close:
+    mov $3, %eax            # close
+    syscall
+    ret
+.size lunso_sys_file_close, .-lunso_sys_file_close
+
 .globl lunso_mem_map
 .type lunso_mem_map, @function
 lunso_mem_map:

@@ -119,4 +119,32 @@ make build/lunso build/std-linux-x86_64.o
 Indexing a raw pointer with `ptr[i]` uses the size of its pointee and has no
 bounds check. Only a writable pointer allows stores. Casts between typed and
 byte pointers preserve read-only access. `size_of(value)` produces a `u64`
-byte size at compile time without evaluating the value.
+byte size at compile time without evaluating the value. Use
+`ptr[start..end]` to borrow a read-only slice over a valid pointer range.
+
+## Files
+
+`std.file` reads and writes byte sequences. Use
+`file.read_all(path, &arena, &bytes)` for an entire input and
+`file.write_all(path, view)` to create or truncate a file. Both close the file
+before returning a byte count or a negative error code. The result of a
+successful read is a `file.Bytes`. Pass `bytes.ptr[0..bytes.len]` to any
+function that takes `[]u8`. The buffer belongs to the supplied arena. Reads
+that outgrow their buffer leave previous buffers in that arena until reset
+or deinitialization.
+
+For streaming, start with a zero-initialized `file.File` and call
+`open_read` or `open_write`. Use `read_into` with a caller-supplied buffer
+or `write_to` with a byte slice, then call `close`. A read with positive
+capacity returns zero at end of file. Keep one handle per open file.
+`open_write` truncates an existing file. Paths are byte slices and must
+contain no zero byte. The Linux platform accepts up to 4095 path bytes.
+
+```sh
+make build/lunso build/std-linux-x86_64.o
+./build/lunso --build examples/file.lunso -o build/file-demo --link build/std-linux-x86_64.o
+demo_exe="$PWD/build/file-demo"
+demo=$(mktemp -d)
+printf 'Hello from std.file\n' > "$demo/input.txt"
+(cd "$demo" && "$demo_exe" && cat output.txt)
+```

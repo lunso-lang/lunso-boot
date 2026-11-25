@@ -24,7 +24,7 @@ typedef enum {
 // A local address carries the addressed slot's type and index (a).
 // Bounds are widened before use.
 // A pointer index carries the pointee type. A cast carries the destination type
-// and the source type kind in b. An immediate carries its constant in a.
+// and the source type kind in b. An immediate carries its low and high bits in a and b.
 // A call stores a function index, the first argument index, and the argument count.
 // Comparison instructions use the operand type and produce a bool value.
 typedef struct {

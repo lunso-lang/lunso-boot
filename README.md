@@ -35,6 +35,29 @@ operand and accept any integer type as the count. Integer and floating-point
 types stay separate. Use an explicit cast such as `value as i32` for integer
 conversions that can lose values.
 
+## Enums
+
+Choose an integer backing type after the name. The first member defaults to
+zero and each later member defaults to the previous value plus one. A member
+can set its value explicitly with an integer literal.
+
+```lunso
+enum TokenKind : u8 {
+    Identifier,
+    Number,
+    End = 255,
+}
+
+struct Token { kind: TokenKind }
+```
+
+Use `TokenKind.Number` to get a value of type `TokenKind`. The backing type
+determines its size and range. Compare values within the same enum and use
+`as` for explicit conversion between an enum and an integer. An integer
+cast may produce a value with no named member. Members can be separated by
+commas, newlines, or semicolons. A closing brace ends a struct or enum
+declaration by itself.
+
 ## Modules and I/O
 
 Project module names are relative to the entry file's directory. When a standard

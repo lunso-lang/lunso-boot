@@ -111,6 +111,16 @@ static bool is_integer(TypeKind type)
     return type >= TYPE_I8 && type <= TYPE_U64;
 }
 
+static bool is_enum(SemaType type)
+{
+    return is_integer(type.kind) && type.record != 0;
+}
+
+static bool is_plain_integer(SemaType type)
+{
+    return is_integer(type.kind) && !is_enum(type);
+}
+
 static bool is_signed(TypeKind type)
 {
     return type >= TYPE_I8 && type <= TYPE_I64;
@@ -260,6 +270,24 @@ static uint32_t find_struct(const Ast *ast, uint32_t module, AstSpan name)
     return UINT32_MAX;
 }
 
+static uint32_t find_enum(const Ast *ast, uint32_t module, AstSpan name)
+{
+    for (uint32_t i = 0; i < ast->enum_count; i++) {
+        if (ast->enums[i].module == module && same_name(ast, name, ast->enums[i].name)) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static SemaType enum_type(const Checker *checker, uint32_t index)
+{
+    AstNodeId backing = checker->ast->enums[index].backing;
+    return (SemaType){.kind = checker->sema->nodes[backing].type.kind, .record = index + 1};
+}
+
+static SemaType resolve_type(Checker *checker, AstNodeId id);
+
 static uint64_t align_bytes(uint64_t size, uint32_t alignment)
 {
     return (size + alignment - 1) & ~((uint64_t)alignment - 1);
@@ -269,6 +297,7 @@ static void layout_struct(Checker *checker, uint32_t index)
 {
     const Ast *ast = checker->ast;
     AstStruct record = ast->structs[index];
+    checker->module = record.module;
     if (scalar_type(ast, record.name) != TYPE_INVALID ||
         find_struct(ast, record.module, record.name) != index) {
         fail_at(checker, record.name.offset, "duplicate or reserved struct name");
@@ -293,25 +322,27 @@ static void layout_struct(Checker *checker, uint32_t index)
         }
         AstNodeId annotation = ast->data[field].b;
         AstKind annotation_kind = ast->kinds[annotation];
-        if (annotation_kind != AST_TYPE_NAME && annotation_kind != AST_POINTER_TYPE) {
+        if (annotation_kind != AST_TYPE_NAME && annotation_kind != AST_POINTER_TYPE &&
+            annotation_kind != AST_QUALIFIED_TYPE) {
             fail(checker, annotation, "struct fields must be scalar");
             return;
         }
-        AstSpan field_type = node_span(ast, annotation);
-        TypeKind kind = annotation_kind == AST_POINTER_TYPE ? TYPE_POINTER
-                                                            : scalar_type(ast, field_type);
-        if (kind == TYPE_INVALID) {
-            fail(checker, annotation, find_struct(ast, record.module, field_type) == UINT32_MAX
-                                      ? "unknown type" : "struct fields must be scalar");
+        SemaType type = annotation_kind == AST_POINTER_TYPE ? (SemaType){.kind = TYPE_POINTER}
+                                                            : resolve_type(checker, annotation);
+        if (type.kind == TYPE_INVALID || failed(checker)) {
             return;
         }
-        uint32_t width = sema_scalar_size(kind);
+        uint32_t width = sema_scalar_size(type.kind);
+        if (!width) {
+            fail(checker, annotation, "struct fields must be scalar");
+            return;
+        }
         size = align_bytes(size, width);
         if (size + width > INT32_MAX - 7u) {
             fail(checker, field, "struct is too large for local storage");
             return;
         }
-        checker->sema->nodes[field].type = (SemaType){.kind = kind};
+        checker->sema->nodes[field].type = type;
         checker->sema->nodes[field].binding = (uint32_t)size;
         size += width;
         if (width > alignment) {
@@ -329,6 +360,9 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     AstKind ast_kind = checker->ast->kinds[id];
     if (ast_kind == AST_QUALIFIED_TYPE) {
         const AstQualified *qualified = ast_qualified(checker->ast, id);
+        if (qualified && qualified->kind == BIND_ENUM) {
+            return enum_type(checker, qualified->index);
+        }
         if (!qualified || qualified->kind != BIND_STRUCT) {
             return fail(checker, id, "unknown qualified type");
         }
@@ -375,6 +409,9 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         return (SemaType){.kind = TYPE_STRUCT, .record = import->index,
                           .record_size = checker->struct_sizes[import->index]};
     }
+    if (import && import->kind == BIND_ENUM) {
+        return enum_type(checker, import->index);
+    }
     TypeKind kind = scalar_type(checker->ast, name);
     if (kind != TYPE_INVALID) {
         return (SemaType){.kind = kind};
@@ -383,6 +420,10 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     if (record != UINT32_MAX) {
         return (SemaType){.kind = TYPE_STRUCT, .record = record,
                           .record_size = checker->struct_sizes[record]};
+    }
+    uint32_t enumeration = find_enum(checker->ast, checker->module, name);
+    if (enumeration != UINT32_MAX) {
+        return enum_type(checker, enumeration);
     }
     return fail(checker, id, "unknown type");
 }
@@ -563,7 +604,7 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
         type.pointee == expected.pointee && expected.read_only) {
         return expected;
     }
-    if (can_promote(type.kind, expected.kind)) {
+    if (!is_enum(type) && !is_enum(expected) && can_promote(type.kind, expected.kind)) {
         promote(checker, id, expected.kind);
         return expected;
     }
@@ -587,21 +628,79 @@ static bool integer_magnitude(const Ast *ast, AstNodeId id, uint64_t *number)
     return true;
 }
 
-static bool integer_fits(TypeKind type, uint64_t number, bool negative)
+static uint64_t integer_limit(TypeKind type, bool negative)
 {
-    if (negative && !is_signed(type)) {
-        return false;
-    }
     uint32_t bits = 8 * sema_scalar_size(type);
     uint64_t limit = UINT64_MAX >> (64 - bits);
     if (is_signed(type)) {
         limit = (limit >> 1) + negative;
     }
-    return number <= limit;
+    return limit;
+}
+
+static bool integer_fits(TypeKind type, uint64_t number, bool negative)
+{
+    return (!negative || is_signed(type)) && number <= integer_limit(type, negative);
+}
+
+static void check_enum(Checker *checker, uint32_t index, uint32_t *next_value)
+{
+    const Ast *ast = checker->ast;
+    AstEnum enumeration = ast->enums[index];
+    if (scalar_type(ast, enumeration.name) != TYPE_INVALID || boolean_name(ast, enumeration.name) ||
+        find_enum(ast, enumeration.module, enumeration.name) != index ||
+        find_struct(ast, enumeration.module, enumeration.name) != UINT32_MAX) {
+        fail_at(checker, enumeration.name.offset, "duplicate or reserved enum name");
+        return;
+    }
+    TypeKind backing = scalar_type(ast, node_span(ast, enumeration.backing));
+    if (!is_integer(backing)) {
+        fail(checker, enumeration.backing, "enum backing type must be an integer");
+        return;
+    }
+    if (!enumeration.cases.count) {
+        fail_at(checker, enumeration.name.offset, "enum must have at least one member");
+        return;
+    }
+    checker->sema->nodes[enumeration.backing].type.kind = backing;
+    const AstNodeId *cases = ast->children + enumeration.cases.first;
+    uint64_t bits = 0;
+    for (uint32_t i = 0; i < enumeration.cases.count; i++) {
+        AstNodeId member = cases[i];
+        for (uint32_t j = 0; j < i; j++) {
+            if (same_name(ast, node_span(ast, member), node_span(ast, cases[j]))) {
+                fail(checker, member, "duplicate enum member name");
+                return;
+            }
+        }
+        AstNodeId literal = ast->data[member].b;
+        if (literal) {
+            bool negative = ast->kinds[literal] == AST_NEGATE;
+            AstNodeId magnitude = negative ? ast->data[literal].a : literal;
+            uint64_t number;
+            if (!integer_magnitude(ast, magnitude, &number) || !integer_fits(backing, number, negative)) {
+                fail(checker, literal, "enum value is out of range for its backing type");
+                return;
+            }
+            bits = negative ? UINT64_C(0) - number : number;
+        } else if (i != 0) {
+            if (bits == integer_limit(backing, false)) {
+                fail(checker, member, "enum value is out of range for its backing type");
+                return;
+            }
+            bits++;
+        }
+        uint32_t slot = (*next_value)++;
+        checker->sema->nodes[member].binding = slot;
+        checker->sema->enum_values[slot] = bits;
+    }
 }
 
 static SemaType integer_literal(Checker *checker, AstNodeId id, SemaType expected, bool negative)
 {
+    if (is_enum(expected)) {
+        expected = no_type;
+    }
     if (negative && is_integer(expected.kind) && !is_signed(expected.kind)) {
         return fail(checker, id, "unary '-' requires a signed number");
     }
@@ -828,7 +927,7 @@ static bool literal_expression(const Ast *ast, AstNodeId id, TypeKind hint,
 
 static SemaType literal_hint(const Ast *ast, AstNodeId id, SemaType peer)
 {
-    return is_numeric(peer.kind) && literal_expression(ast, id, peer.kind, 0, false)
+    return !is_enum(peer) && is_numeric(peer.kind) && literal_expression(ast, id, peer.kind, 0, false)
            ? peer : no_type;
 }
 
@@ -846,6 +945,9 @@ typedef enum { NO_ADDRESS, READ_ONLY_ADDRESS, WRITABLE_ADDRESS } AddressAccess;
 static AddressAccess address_access(const Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
+    if (checker->sema->nodes[id].is_enum_case) {
+        return NO_ADDRESS;
+    }
     while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
         AstNodeId base = ast->data[id].a;
         if (ast->kinds[id] == AST_INDEX) {
@@ -889,7 +991,8 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         (target != AST_IDENTIFIER || boolean_name(ast, node_span(ast, node.a)))) {
         return fail(checker, node.a, "assignment requires a local variable, array element, or field");
     }
-    SemaType context = !is_comparison(kind) && is_numeric(expected.kind) ? expected : no_type;
+    SemaType context = !is_comparison(kind) && !is_enum(expected) && is_numeric(expected.kind)
+                       ? expected : no_type;
     SemaType left;
     SemaType right;
     if (assignment || shift) {
@@ -926,6 +1029,12 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
     }
     if (kind == AST_ASSIGN) {
         return left;
+    }
+    if (is_enum(left) || is_enum(right)) {
+        if (is_comparison(kind) && same_type(left, right)) {
+            return bool_type;
+        }
+        return fail(checker, id, "enum operands must be compared within the same enum or cast to integers");
     }
     if (kind == AST_EQUAL || kind == AST_NOT_EQUAL) {
         if ((left.kind == TYPE_BOOL && right.kind == TYPE_BOOL) ||
@@ -970,7 +1079,7 @@ static SemaType check_unary(Checker *checker, AstNodeId id, SemaType expected)
     if (failed(checker)) {
         return no_type;
     }
-    if (kind == AST_BIT_NOT ? !is_integer(type.kind) : !is_numeric(type.kind)) {
+    if (is_enum(type) || (kind == AST_BIT_NOT ? !is_integer(type.kind) : !is_numeric(type.kind))) {
         return fail(checker, id, "invalid unary operand type");
     }
     if (kind == AST_NEGATE && !is_signed(type.kind) && !is_float(type.kind)) {
@@ -983,11 +1092,44 @@ static SemaType check_member(Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
     AstNodeData node = ast->data[id];
+    AstSpan name = {ast->positions[id], node.b};
+    const AstQualified *qualified = ast_qualified(ast, id);
+    AstNodeId root = node.a;
+    if (qualified && qualified->kind == BIND_ENUM) {
+        while (ast->kinds[root] == AST_MEMBER) {
+            root = ast->data[root].a;
+        }
+    }
+    uint32_t enumeration = UINT32_MAX;
+    if (ast->kinds[root] == AST_IDENTIFIER && !find_local(checker, node_span(ast, root), 0)) {
+        if (qualified && qualified->kind == BIND_ENUM) {
+            if (qualified->inaccessible) {
+                return fail(checker, id, "cannot access a private enum");
+            }
+            enumeration = qualified->index;
+        } else if (root == node.a) {
+            AstSpan type_name = node_span(ast, root);
+            const AstBinding *binding = ast_imported(ast, checker->module, type_name);
+            enumeration = binding && binding->kind == BIND_ENUM ? binding->index
+                                                               : find_enum(ast, checker->module, type_name);
+        }
+    }
+    if (enumeration != UINT32_MAX) {
+        AstNodeRange cases = ast->enums[enumeration].cases;
+        for (uint32_t i = 0; i < cases.count; i++) {
+            AstNodeId member = ast->children[cases.first + i];
+            if (same_name(ast, name, node_span(ast, member))) {
+                checker->sema->nodes[id].binding = checker->sema->nodes[member].binding;
+                checker->sema->nodes[id].is_enum_case = true;
+                return enum_type(checker, enumeration);
+            }
+        }
+        return fail(checker, id, "unknown enum member");
+    }
     SemaType base = value(checker, node.a, no_type);
     if (base.kind != TYPE_STRUCT) {
         return fail(checker, id, "member access requires a struct value");
     }
-    AstSpan name = {ast->positions[id], node.b};
     AstNodeRange fields = ast->structs[base.record].fields;
     for (uint32_t i = 0; i < fields.count; i++) {
         AstNodeId field = ast->children[fields.first + i];
@@ -1015,7 +1157,8 @@ static SemaType check_cast(Checker *checker, AstNodeId id)
         source_hint.kind = TYPE_I64;
     }
     SemaType source = value(checker, node.a, source_hint);
-    if ((is_integer(source.kind) && is_integer(target.kind)) ||
+    if ((is_integer(source.kind) && is_integer(target.kind) &&
+         (!is_enum(source) || !is_enum(target) || same_type(source, target))) ||
         (source.kind == TYPE_POINTER && target.kind == TYPE_U64)) {
         return target;
     }
@@ -1023,9 +1166,10 @@ static SemaType check_cast(Checker *checker, AstNodeId id)
         if (source.read_only && !target.read_only) {
             return fail(checker, id, "cast cannot remove read-only access");
         }
-        TypeKind from = checker->sema->pointees[source.pointee].kind;
-        TypeKind to = checker->sema->pointees[target.pointee].kind;
-        if (source.pointee == target.pointee || from == TYPE_U8 || to == TYPE_U8) {
+        SemaType from = checker->sema->pointees[source.pointee];
+        SemaType to = checker->sema->pointees[target.pointee];
+        if (source.pointee == target.pointee || (from.kind == TYPE_U8 && !is_enum(from)) ||
+            (to.kind == TYPE_U8 && !is_enum(to))) {
             return target;
         }
     }
@@ -1050,7 +1194,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
     case AST_INDEX: {
         SemaType base = value(checker, node.a, no_type);
         SemaType index = value(checker, node.b, no_type);
-        if ((!is_array_like(base.kind) && base.kind != TYPE_POINTER) || !is_integer(index.kind)) {
+        if ((!is_array_like(base.kind) && base.kind != TYPE_POINTER) || !is_plain_integer(index)) {
             return fail(checker, id, "indexing requires an array, slice, or pointer and an integer index");
         }
         return base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee] : element_type(base);
@@ -1061,7 +1205,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         SemaType start = value(checker, bounds.a, no_type);
         SemaType end = value(checker, bounds.b, no_type);
         if ((!is_array_like(base.kind) && base.kind != TYPE_POINTER) ||
-            !is_integer(start.kind) || !is_integer(end.kind)) {
+            !is_plain_integer(start) || !is_plain_integer(end)) {
             return fail(checker, id, "slicing requires an array, slice, or pointer and integer bounds");
         }
         if (failed(checker)) {
@@ -1240,6 +1384,7 @@ void sema_destroy(Sema *sema)
     free(sema->nodes);
     free(sema->functions);
     free(sema->pointees);
+    free(sema->enum_values);
     *sema = (Sema){0};
 }
 
@@ -1258,9 +1403,20 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     if (ast->struct_count) {
         checker.struct_sizes = calloc(ast->struct_count, sizeof(*checker.struct_sizes));
     }
+    size_t enum_value_count = 0;
+    for (uint32_t i = 0; i < ast->enum_count; i++) {
+        enum_value_count += ast->enums[i].cases.count;
+    }
+    if (enum_value_count) {
+        out->enum_values = calloc(enum_value_count, sizeof(*out->enum_values));
+    }
     if (!out->nodes || (ast->function_count && !out->functions) ||
-        (ast->struct_count && !checker.struct_sizes)) {
+        (ast->struct_count && !checker.struct_sizes) || (enum_value_count && !out->enum_values)) {
         fail_at(&checker, 0, "could not allocate semantic analysis storage");
+    }
+    uint32_t next_value = 0;
+    for (uint32_t i = 0; i < ast->enum_count && !failed(&checker); i++) {
+        check_enum(&checker, i, &next_value);
     }
     for (uint32_t i = 0; i < ast->struct_count && !failed(&checker); i++) {
         layout_struct(&checker, i);

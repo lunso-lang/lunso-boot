@@ -15,7 +15,7 @@ typedef struct {
     TypeKind kind;
     uint32_t length;  // Number of elements for fixed arrays.
     TypeKind element;  // Element type for arrays and slices.
-    uint32_t record;       // Index in Ast.structs for a struct or a collection of one.
+    uint32_t record;       // Struct index, or one-based enum index for an integer representation.
     uint32_t record_size;  // Size including alignment padding.
     uint32_t pointee;      // Index in Sema.pointees for a pointer or a collection of pointers.
     bool read_only;        // The pointer (or a pointer element) gives read-only access.
@@ -25,12 +25,13 @@ typedef enum { BUILTIN_NONE, BUILTIN_LEN, BUILTIN_DATA, BUILTIN_SIZE_OF } SemaBu
 
 typedef struct {
     SemaType type;
-    uint32_t binding;  // Local slot, function index on AST_CALL, or field byte offset.
+    uint32_t binding;  // Local slot, function index, field byte offset, or enum value index.
     SemaBuiltin builtin;
     TypeKind promotion;  // Numeric destination, or TYPE_INVALID for the original type.
     bool is_boolean_literal;
     bool borrow_array;  // The expression's fixed array is used as a full slice.
     bool falls_through;
+    bool is_enum_case;
 } SemaNode;
 
 typedef struct {
@@ -42,6 +43,7 @@ typedef struct {
     SemaNode *nodes;          // Indexed by AstNodeId.
     SemaFunction *functions;  // Indexed like Ast.functions.
     SemaType *pointees;
+    uint64_t *enum_values;
     uint32_t pointee_count;
 } Sema;
 

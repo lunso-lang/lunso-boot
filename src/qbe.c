@@ -51,6 +51,15 @@ static void write_symbol(FILE *out, const IrModule *module, uint32_t index)
     fwrite(module->source + name.offset, 1, name.length, out);
 }
 
+static void write_integer_bits(FILE *out, uint64_t bits)
+{
+    if (bits > INT64_MAX) {
+        fprintf(out, "-%" PRIu64, UINT64_C(0) - bits);
+    } else {
+        fprintf(out, "%" PRIu64, bits);
+    }
+}
+
 static void write_integer(FILE *out, const unsigned char *text, uint32_t length, bool negative)
 {
     uint64_t bits = 0;
@@ -60,11 +69,7 @@ static void write_integer(FILE *out, const unsigned char *text, uint32_t length,
     if (negative) {
         bits = 0 - bits;
     }
-    if (bits > INT64_MAX) {
-        fprintf(out, "-%" PRIu64, UINT64_C(0) - bits);
-    } else {
-        fprintf(out, "%" PRIu64, bits);
-    }
+    write_integer_bits(out, bits);
 }
 
 static void write_number(FILE *out, const IrModule *module, IrInstruction inst)
@@ -321,8 +326,9 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         break;
     case IR_BOOL:
     case IR_IMMEDIATE:
-        fprintf(out, "\t%%v%" PRIu32 " =%c copy %" PRIu32 "\n",
-                inst.result, types[inst.type.kind].base, inst.a);
+        fprintf(out, "\t%%v%" PRIu32 " =%c copy ", inst.result, types[inst.type.kind].base);
+        write_integer_bits(out, ((uint64_t)inst.b << 32) | inst.a);
+        fputc('\n', out);
         if (inst.type.kind == TYPE_SLICE) {
             fprintf(out, "\t%%len%" PRIu32 " =l copy 0\n", inst.result);
         }

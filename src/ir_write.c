@@ -124,7 +124,13 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         } else if (instruction.type.kind == TYPE_BOOL) {
             fputs(instruction.a ? "true" : "false", output);
         } else {
-            fprintf(output, "%" PRIu32, instruction.a);
+            uint64_t bits = ((uint64_t)instruction.b << 32) | instruction.a;
+            if (instruction.type.kind >= TYPE_I8 && instruction.type.kind <= TYPE_I64 &&
+                bits > INT64_MAX) {
+                fprintf(output, "-%" PRIu64, UINT64_C(0) - bits);
+            } else {
+                fprintf(output, "%" PRIu64, bits);
+            }
         }
         break;
     case IR_LOAD:

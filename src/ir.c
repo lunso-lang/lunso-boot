@@ -321,6 +321,10 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
     case AST_INDEX:
     case AST_MEMBER:
     case AST_DEREFERENCE: {
+        if (info.is_enum_case) {
+            uint64_t bits = lowering->sema->enum_values[info.binding];
+            return emit_value(lowering, IR_IMMEDIATE, info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
+        }
         uint32_t address = lower_memory_address(lowering, id);
         return uses_storage(info.type) ? address
                                        : emit_value(lowering, IR_MEMORY_LOAD, info.type, address, 0, 0);

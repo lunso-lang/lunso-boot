@@ -118,3 +118,6 @@ typedef struct {
 
     AstNodeRange declarations;  // Top-level nodes in children, in source order.
 } Ast;
+
+// Releases parser-owned AST storage. The caller retains ownership of the source buffer.
+void ast_destroy(Ast *ast);

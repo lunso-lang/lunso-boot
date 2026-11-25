@@ -254,3 +254,19 @@ Token lexer_next(Lexer *lexer)
     token.length = lexer->offset - token.offset;
     return token;
 }
+
+const char *lexer_error_message(TokenKind kind)
+{
+    switch (kind) {
+    case TOKEN_INVALID:
+        return "unexpected byte";
+    case TOKEN_INVALID_NUMBER:
+        return "invalid exponent in number";
+    case TOKEN_UNTERMINATED_STRING:
+        return "unterminated string";
+    case TOKEN_UNTERMINATED_COMMENT:
+        return "unterminated block comment";
+    default:
+        return NULL;
+    }
+}

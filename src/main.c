@@ -1,8 +1,11 @@
 #include "lexer.h"
+#include "parser.h"
 
+#include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static unsigned char *read_source(FILE *file, size_t *length)
 {
@@ -49,6 +52,17 @@ static void print_lexeme(const unsigned char *bytes, size_t length)
             break;
         }
     }
+}
+
+static int report_source_error(const char *path, const unsigned char *source,
+                               Token token, const char *message)
+{
+    fprintf(stderr, "%s:%zu:%zu: %s", path, token.line, token.column, message);
+    if (token.kind == TOKEN_INVALID) {
+        fprintf(stderr, " 0x%02X", (unsigned int)source[token.offset]);
+    }
+    fputc('\n', stderr);
+    return EXIT_FAILURE;
 }
 
 static int dump_tokens(const char *path, const unsigned char *source, size_t length)
@@ -107,27 +121,14 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
         [TOKEN_SHIFT_RIGHT_EQUAL] = "SHIFT_RIGHT_EQUAL",
         [TOKEN_NEWLINE] = "NEWLINE",
         [TOKEN_EOF] = "EOF",
-        [TOKEN_INVALID_NUMBER] = "invalid exponent in number",
-        [TOKEN_UNTERMINATED_STRING] = "unterminated string",
-        [TOKEN_UNTERMINATED_COMMENT] = "unterminated block comment",
     };
 
     Lexer lexer = lexer_init(source, length);
     for (;;) {
         Token token = lexer_next(&lexer);
-        switch (token.kind) {
-        case TOKEN_INVALID:
-            fprintf(stderr, "%s:%zu:%zu: unexpected byte 0x%02X\n", path,
-                    token.line, token.column, (unsigned int)source[token.offset]);
-            return EXIT_FAILURE;
-        case TOKEN_INVALID_NUMBER:
-        case TOKEN_UNTERMINATED_STRING:
-        case TOKEN_UNTERMINATED_COMMENT:
-            fprintf(stderr, "%s:%zu:%zu: %s\n", path, token.line, token.column,
-                    names[token.kind]);
-            return EXIT_FAILURE;
-        default:
-            break;
+        const char *error = lexer_error_message(token.kind);
+        if (error) {
+            return report_source_error(path, source, token, error);
         }
 
         printf("%zu:%zu %s", token.line, token.column, names[token.kind]);
@@ -151,14 +152,30 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
     }
 }
 
+static int parse_source(const char *path, const unsigned char *source, size_t length)
+{
+    Ast ast;
+    ParseError error;
+    if (!parser_parse(source, length, &ast, &error)) {
+        return report_source_error(path, source, error.token, error.message);
+    }
+
+    uint32_t nodes = ast.node_count ? ast.node_count - 1 : 0;
+    printf("Parsed %" PRIu32 " function(s), %" PRIu32 " AST node(s)\n",
+           ast.function_count, nodes);
+    ast_destroy(&ast);
+    return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: %s <source.lunso>\n", argv[0]);
+    bool parse = argc > 1 && strcmp(argv[1], "--parse") == 0;
+    if (argc != (parse ? 3 : 2)) {
+        fprintf(stderr, "usage: %s [--parse] <source.lunso>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    const char *path = argv[1];
+    const char *path = argv[parse ? 2 : 1];
     FILE *file = fopen(path, "rb");
     if (!file) {
         perror(path);
@@ -173,7 +190,7 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    int result = dump_tokens(path, source, length);
+    int result = parse ? parse_source(path, source, length) : dump_tokens(path, source, length);
     free(source);
     return result;
 }

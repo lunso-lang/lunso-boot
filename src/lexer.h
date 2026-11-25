@@ -80,3 +80,4 @@ typedef struct {
 
 Lexer lexer_init(const unsigned char *source, size_t length);
 Token lexer_next(Lexer *lexer);
+const char *lexer_error_message(TokenKind kind);

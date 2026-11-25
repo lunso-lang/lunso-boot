@@ -68,6 +68,7 @@ static TokenKind scan_identifier(Lexer *lexer, size_t start)
     } keywords[] = {
         {"fun", TOKEN_FUN},
         {"ext", TOKEN_EXT},
+        {"struct", TOKEN_STRUCT},
         {"return", TOKEN_RETURN},
         {"if", TOKEN_IF},
         {"else", TOKEN_ELSE},

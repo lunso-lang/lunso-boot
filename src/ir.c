@@ -137,9 +137,25 @@ static uint32_t lower_element_address(Lowering *lowering, AstNodeId id)
                       base, index, 0);
 }
 
-static void init_array(Lowering *lowering, SemaType type, uint32_t target, uint32_t source)
+static uint32_t lower_memory_address(Lowering *lowering, AstNodeId id)
 {
-    emit(lowering, (IrInstruction){.op = IR_ARRAY_INIT, .type = type, .a = target, .b = source});
+    if (lowering->ast->kinds[id] == AST_INDEX) {
+        return lower_element_address(lowering, id);
+    }
+    AstNodeId base = lowering->ast->data[id].a;
+    uint32_t value = lower_expression(lowering, base);
+    return emit_value(lowering, IR_FIELD_ADDRESS, lowering->sema->nodes[base].type,
+                      value, lowering->sema->nodes[id].binding, 0);
+}
+
+static bool uses_storage(SemaType type)
+{
+    return type.kind == TYPE_ARRAY || type.kind == TYPE_STRUCT;
+}
+
+static void init_storage(Lowering *lowering, SemaType type, uint32_t target, uint32_t source)
+{
+    emit(lowering, (IrInstruction){.op = IR_STORAGE_INIT, .type = type, .a = target, .b = source});
 }
 
 static uint32_t lower_call(Lowering *lowering, AstNodeId id)
@@ -210,24 +226,28 @@ static uint32_t lower_binary(Lowering *lowering, AstNodeId id)
         return lower_logical(lowering, kind, data, type);
     }
     if (kind >= AST_ASSIGN && kind <= AST_ASSIGN_SHIFT_RIGHT) {
-        bool element = lowering->ast->kinds[data.a] == AST_INDEX;
-        uint32_t target = element ? lower_element_address(lowering, data.a)
-                                  : lowering->sema->nodes[data.a].binding;
+        AstKind target_kind = lowering->ast->kinds[data.a];
+        bool memory = target_kind == AST_INDEX || target_kind == AST_MEMBER;
+        uint32_t target = memory ? lower_memory_address(lowering, data.a)
+                                 : lowering->sema->nodes[data.a].binding;
+        if (uses_storage(type)) {
+            uint32_t address = memory ? target : emit_value(lowering, IR_LOAD, type, target, 0, 0);
+            uint32_t source = lower_expression(lowering, data.b);
+            init_storage(lowering, type, address, source);
+            return address;
+        }
         uint32_t current = 0;
-        if (kind != AST_ASSIGN || type.kind == TYPE_ARRAY) {
-            current = emit_value(lowering, element ? IR_ELEMENT_LOAD : IR_LOAD, type,
+        if (kind != AST_ASSIGN) {
+            current = emit_value(lowering, memory ? IR_MEMORY_LOAD : IR_LOAD, type,
                                  target, 0, 0);
         }
         uint32_t value = lower_expression(lowering, data.b);
         if (kind != AST_ASSIGN) {
             value = emit_value(lowering, binary_ops[kind], type, current, value, 0);
         }
-        if (element) {
-            emit(lowering, (IrInstruction){.op = IR_ELEMENT_STORE, .type = type,
+        if (memory) {
+            emit(lowering, (IrInstruction){.op = IR_MEMORY_STORE, .type = type,
                                           .a = target, .b = value});
-        } else if (type.kind == TYPE_ARRAY) {
-            init_array(lowering, type, current, value);
-            return current;
         } else {
             store(lowering, type, target, value);
         }
@@ -267,9 +287,11 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         return emit_value(lowering, IR_BYTES, info.type, ast->positions[id], data.a, 0);
     case AST_CALL:
         return lower_call(lowering, id);
-    case AST_INDEX: {
-        uint32_t address = lower_element_address(lowering, id);
-        return emit_value(lowering, IR_ELEMENT_LOAD, info.type, address, 0, 0);
+    case AST_INDEX:
+    case AST_MEMBER: {
+        uint32_t address = lower_memory_address(lowering, id);
+        return uses_storage(info.type) ? address
+                                       : emit_value(lowering, IR_MEMORY_LOAD, info.type, address, 0, 0);
     }
     case AST_SLICE: {
         uint32_t base = lower_expression(lowering, data.a);
@@ -398,11 +420,11 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
     case AST_VAR: {
         SemaNode info = lowering->sema->nodes[id];
         AstNodeId initializer = ast->variables[data.a].initializer;
-        if (info.type.kind == TYPE_ARRAY) {
-            uint32_t array = emit_value(lowering, IR_ARRAY_ALLOC, info.type, 0, 0, 0);
+        if (uses_storage(info.type)) {
+            uint32_t address = emit_value(lowering, IR_STORAGE_ALLOC, info.type, 0, 0, 0);
             uint32_t from = initializer ? lower_expression(lowering, initializer) : 0;
-            init_array(lowering, info.type, array, from);
-            store(lowering, info.type, info.binding, array);
+            init_storage(lowering, info.type, address, from);
+            store(lowering, info.type, info.binding, address);
             break;
         }
         uint32_t value = initializer ? lower_expression(lowering, initializer)
@@ -454,6 +476,16 @@ static void lower_function(Lowering *lowering, uint32_t index)
 bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
 {
     *out = (IrModule){.source = ast->source, .function_count = ast->function_count};
+    if (ast->struct_count) {
+        out->struct_names = calloc(ast->struct_count, sizeof(*out->struct_names));
+        if (!out->struct_names) {
+            ir_destroy(out);
+            return false;
+        }
+        for (uint32_t i = 0; i < ast->struct_count; i++) {
+            out->struct_names[i] = ast->structs[i].name;
+        }
+    }
     if (ast->function_count == 0) {
         return true;
     }
@@ -483,6 +515,7 @@ bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
 
 void ir_destroy(IrModule *module)
 {
+    free(module->struct_names);
     free(module->functions);
     free(module->parameters);
     free(module->instructions);

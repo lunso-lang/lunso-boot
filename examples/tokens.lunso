@@ -1,0 +1,47 @@
+struct Token {
+    kind: u8
+    start: i64
+    length: i64
+}
+
+fun word_kind(word: []u8): u8 {
+    if len(word) == 3 && word[0] == 102 && word[1] == 117 && word[2] == 110 {
+        return 1
+    }
+    return 2
+}
+
+fun check_tokens(tokens: []Token): bool {
+    return (
+        len(tokens) == 2 &&
+        tokens[0].kind == 1 && tokens[0].start == 0 && tokens[0].length == 3 &&
+        tokens[1].kind == 2 && tokens[1].start == 4 && tokens[1].length == 4
+    )
+}
+
+fun main(): i32 {
+    var source: []u8 = "fun main"
+    var tokens: [256]Token
+    var count: i64 = 0
+    var pos: i64 = 0
+
+    for pos < len(source) {
+        if source[pos] == 32 {
+            pos += 1
+        } else {
+            var start: i64 = pos
+            for pos < len(source) && source[pos] != 32 {
+                pos += 1
+            }
+            tokens[count].kind = word_kind(source[start..pos])
+            tokens[count].start = start
+            tokens[count].length = pos - start
+            count += 1
+        }
+    }
+
+    if check_tokens(tokens[0..count]) {
+        return 0
+    }
+    return 1
+}

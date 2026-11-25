@@ -6,8 +6,8 @@
 
 typedef enum {
     IR_LABEL, IR_NUMBER, IR_BOOL, IR_BYTES, IR_ZERO, IR_LOAD, IR_STORE, IR_CALL,
-    IR_ARRAY_ALLOC, IR_ARRAY_INIT, IR_WIDEN_INDEX, IR_ELEMENT_ADDRESS,
-    IR_ELEMENT_LOAD, IR_ELEMENT_STORE, IR_SLICE, IR_ARRAY_VIEW, IR_LEN,
+    IR_STORAGE_ALLOC, IR_STORAGE_INIT, IR_WIDEN_INDEX, IR_ELEMENT_ADDRESS,
+    IR_FIELD_ADDRESS, IR_MEMORY_LOAD, IR_MEMORY_STORE, IR_SLICE, IR_ARRAY_VIEW, IR_LEN,
     IR_JUMP, IR_BRANCH, IR_RETURN,
     IR_NEGATE, IR_LOGICAL_NOT, IR_BIT_NOT,
     IR_ADD, IR_SUBTRACT, IR_MULTIPLY, IR_DIVIDE, IR_REMAINDER,
@@ -17,8 +17,9 @@ typedef enum {
 
 // Value IDs begin at 1. Value ID 0 is absent. Slots and labels start at 0.
 // Number/byte constants use a source offset and length in a and b. For a number,
-// c adds a minus sign. Array operations carry the collection type, and element
-// loads and stores carry the element type. Bounds are widened before use.
+// c adds a minus sign. Array operations carry the collection type. Memory
+// access uses the scalar type, and field addresses carry their byte offset in b.
+// Bounds are widened before use.
 // A call stores a function index, the first argument index, and the argument count.
 // Comparison instructions use the operand type and produce a bool value.
 typedef struct {
@@ -39,6 +40,7 @@ typedef struct {
 
 typedef struct {
     const unsigned char *source;  // Borrowed for names and literal spellings.
+    AstSpan *struct_names;        // Indexed by SemaType.record.
     IrFunction *functions;
     uint32_t function_count;
     SemaType *parameters;

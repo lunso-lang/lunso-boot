@@ -7,14 +7,20 @@ static void write_span(FILE *output, const IrModule *module, AstSpan span)
     fwrite(module->source + span.offset, 1, span.length, output);
 }
 
-static void write_type(FILE *output, SemaType type)
+static void write_type(FILE *output, const IrModule *module, SemaType type)
 {
-    if (type.kind == TYPE_ARRAY) {
-        fprintf(output, "[%" PRIu32 "]%s", type.length, sema_type_name(type.element));
-    } else if (type.kind == TYPE_SLICE) {
-        fprintf(output, "[]%s", sema_type_name(type.element));
+    TypeKind kind = type.kind;
+    if (kind == TYPE_ARRAY) {
+        fprintf(output, "[%" PRIu32 "]", type.length);
+        kind = type.element;
+    } else if (kind == TYPE_SLICE) {
+        fputs("[]", output);
+        kind = type.element;
+    }
+    if (kind == TYPE_STRUCT) {
+        write_span(output, module, module->struct_names[type.record]);
     } else {
-        fputs(sema_type_name(type.kind), output);
+        fputs(sema_type_name(kind), output);
     }
 }
 
@@ -41,7 +47,7 @@ static void write_bytes(FILE *output, const IrModule *module, IrInstruction inst
     }
 }
 
-static void write_operation(FILE *output, IrInstruction instruction)
+static void write_operation(FILE *output, const IrModule *module, IrInstruction instruction)
 {
     static const char *const names[] = {
         [IR_NEGATE] = "neg", [IR_LOGICAL_NOT] = "not", [IR_BIT_NOT] = "bit_not",
@@ -53,7 +59,7 @@ static void write_operation(FILE *output, IrInstruction instruction)
         [IR_SHIFT_LEFT] = "shl", [IR_SHIFT_RIGHT] = "shr",
     };
     fprintf(output, "%s.", names[instruction.op]);
-    write_type(output, instruction.type);
+    write_type(output, module, instruction.type);
     fputc(' ', output);
     write_value(output, instruction.a);
     if (instruction.b) {
@@ -81,7 +87,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
     case IR_BYTES:
     case IR_ZERO:
         fputs("const.", output);
-        write_type(output, instruction.type);
+        write_type(output, module, instruction.type);
         fputc(' ', output);
         if (instruction.op == IR_NUMBER) {
             if (instruction.c) {
@@ -99,20 +105,20 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
     case IR_LOAD:
     case IR_STORE:
         fputs(instruction.op == IR_LOAD ? "load." : "store.", output);
-        write_type(output, instruction.type);
+        write_type(output, module, instruction.type);
         fprintf(output, " $%" PRIu32, instruction.a);
         if (instruction.op == IR_STORE) {
             fputs(", ", output);
             write_value(output, instruction.b);
         }
         break;
-    case IR_ARRAY_ALLOC:
+    case IR_STORAGE_ALLOC:
         fputs("alloc.", output);
-        write_type(output, instruction.type);
+        write_type(output, module, instruction.type);
         break;
-    case IR_ARRAY_INIT:
+    case IR_STORAGE_INIT:
         fputs("init.", output);
-        write_type(output, instruction.type);
+        write_type(output, module, instruction.type);
         fputc(' ', output);
         write_value(output, instruction.a);
         fputs(", ", output);
@@ -124,21 +130,28 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         break;
     case IR_WIDEN_INDEX:
     case IR_LEN:
-    case IR_ELEMENT_LOAD:
+    case IR_MEMORY_LOAD:
     case IR_ARRAY_VIEW:
         fputs(instruction.op == IR_LEN ? "len." :
               instruction.op == IR_WIDEN_INDEX ? "widen_index." :
-              instruction.op == IR_ARRAY_VIEW ? "array_view." : "load_element.", output);
-        write_type(output, instruction.type);
+              instruction.op == IR_ARRAY_VIEW ? "array_view." : "load_memory.", output);
+        write_type(output, module, instruction.type);
         fputc(' ', output);
         write_value(output, instruction.a);
         break;
+    case IR_FIELD_ADDRESS:
+        fputs("field_address.", output);
+        write_type(output, module, instruction.type);
+        fputc(' ', output);
+        write_value(output, instruction.a);
+        fprintf(output, ", %" PRIu32, instruction.b);
+        break;
     case IR_ELEMENT_ADDRESS:
-    case IR_ELEMENT_STORE:
+    case IR_MEMORY_STORE:
     case IR_SLICE:
         fputs(instruction.op == IR_SLICE ? "slice." :
-              instruction.op == IR_ELEMENT_ADDRESS ? "element_address." : "store_element.", output);
-        write_type(output, instruction.type);
+              instruction.op == IR_ELEMENT_ADDRESS ? "element_address." : "store_memory.", output);
+        write_type(output, module, instruction.type);
         fputc(' ', output);
         write_value(output, instruction.a);
         fputs(", ", output);
@@ -150,7 +163,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         break;
     case IR_CALL:
         fputs("call.", output);
-        write_type(output, instruction.type);
+        write_type(output, module, instruction.type);
         fputs(" @", output);
         write_span(output, module, module->functions[instruction.a].name);
         fputc('(', output);
@@ -182,7 +195,7 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
         }
         break;
     default:
-        write_operation(output, instruction);
+        write_operation(output, module, instruction);
         break;
     }
     fputc('\n', output);
@@ -205,10 +218,10 @@ bool ir_write(FILE *output, const IrModule *module)
             if (!fn.external) {
                 fprintf(output, "$%" PRIu32 ": ", p);
             }
-            write_type(output, module->parameters[fn.first_parameter + p]);
+            write_type(output, module, module->parameters[fn.first_parameter + p]);
         }
         fputs("): ", output);
-        write_type(output, fn.result);
+        write_type(output, module, fn.result);
         if (fn.external) {
             fputc('\n', output);
             continue;

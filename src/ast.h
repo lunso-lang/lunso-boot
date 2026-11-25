@@ -20,6 +20,8 @@ enum {
     AST_INVALID,
 
     AST_FUNCTION,   // a: functions index
+    AST_STRUCT,     // a: structs index
+    AST_FIELD,      // a: name length, b: type node
     AST_PARAMETER,  // a: name length, b: type node
     AST_TYPE_NAME,  // a: name length
     AST_ARRAY_TYPE, // a: element type, b: length literal or AST_NODE_NONE for a slice
@@ -97,6 +99,11 @@ typedef struct {
 } AstFunction;
 
 typedef struct {
+    AstSpan name;
+    AstNodeRange fields;  // Range in children.
+} AstStruct;
+
+typedef struct {
     AstNodeId then_branch;
     AstNodeId else_branch;  // AST_NODE_NONE if absent.
 } AstIfBranches;
@@ -131,6 +138,8 @@ typedef struct {
     uint32_t child_count;
     AstFunction *functions;
     uint32_t function_count;
+    AstStruct *structs;
+    uint32_t struct_count;
     AstIfBranches *if_branches;
     uint32_t if_branch_count;
     AstForHeader *for_headers;

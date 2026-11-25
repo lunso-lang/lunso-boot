@@ -17,6 +17,7 @@ typedef struct {
     SemaError error;
     uint32_t *function_map;
     size_t function_capacity;
+    uint32_t *struct_sizes;
     Local *locals;
     size_t local_count;
     size_t local_capacity;
@@ -44,7 +45,7 @@ const char *sema_type_name(TypeKind type)
         [TYPE_I8] = "i8", [TYPE_I16] = "i16", [TYPE_I32] = "i32", [TYPE_I64] = "i64",
         [TYPE_U8] = "u8", [TYPE_U16] = "u16", [TYPE_U32] = "u32", [TYPE_U64] = "u64",
         [TYPE_F32] = "f32", [TYPE_F64] = "f64",
-        [TYPE_ARRAY] = "array", [TYPE_SLICE] = "slice",
+        [TYPE_STRUCT] = "struct", [TYPE_ARRAY] = "array", [TYPE_SLICE] = "slice",
     };
     return names[type];
 }
@@ -55,9 +56,19 @@ uint32_t sema_scalar_size(TypeKind type)
         [TYPE_INVALID] = 0, [TYPE_VOID] = 0, [TYPE_BOOL] = 1,
         [TYPE_I8] = 1, [TYPE_I16] = 2, [TYPE_I32] = 4, [TYPE_I64] = 8,
         [TYPE_U8] = 1, [TYPE_U16] = 2, [TYPE_U32] = 4, [TYPE_U64] = 8,
-        [TYPE_F32] = 4, [TYPE_F64] = 8, [TYPE_ARRAY] = 0, [TYPE_SLICE] = 0,
+        [TYPE_F32] = 4, [TYPE_F64] = 8, [TYPE_STRUCT] = 0, [TYPE_ARRAY] = 0, [TYPE_SLICE] = 0,
     };
     return sizes[type];
+}
+
+uint32_t sema_element_size(SemaType type)
+{
+    return type.element == TYPE_STRUCT ? type.record_size : sema_scalar_size(type.element);
+}
+
+uint32_t sema_storage_size(SemaType type)
+{
+    return type.kind == TYPE_STRUCT ? type.record_size : type.length * sema_element_size(type);
 }
 
 static bool failed(const Checker *checker)
@@ -113,7 +124,8 @@ static bool is_numeric(TypeKind type)
 
 static bool same_type(SemaType a, SemaType b)
 {
-    return a.kind == b.kind && a.length == b.length && a.element == b.element;
+    return a.kind == b.kind && a.length == b.length && a.element == b.element &&
+           a.record == b.record;
 }
 
 static bool is_array_like(TypeKind type)
@@ -143,6 +155,87 @@ static bool boolean_name(const Ast *ast, AstSpan name)
     return name_is(ast, name, "true") || name_is(ast, name, "false");
 }
 
+static TypeKind scalar_type(const Ast *ast, AstSpan name)
+{
+    if (name_is(ast, name, "int")) {
+        return TYPE_I32;
+    }
+    for (TypeKind kind = TYPE_BOOL; kind <= TYPE_F64; kind++) {
+        if (name_is(ast, name, sema_type_name(kind))) {
+            return kind;
+        }
+    }
+    return TYPE_INVALID;
+}
+
+static uint32_t find_struct(const Ast *ast, AstSpan name)
+{
+    for (uint32_t i = 0; i < ast->struct_count; i++) {
+        if (same_name(ast, name, ast->structs[i].name)) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
+}
+
+static uint64_t align_bytes(uint64_t size, uint32_t alignment)
+{
+    return (size + alignment - 1) & ~((uint64_t)alignment - 1);
+}
+
+static void layout_struct(Checker *checker, uint32_t index)
+{
+    const Ast *ast = checker->ast;
+    AstStruct record = ast->structs[index];
+    if (scalar_type(ast, record.name) != TYPE_INVALID || find_struct(ast, record.name) != index) {
+        fail_at(checker, record.name.offset, "duplicate or reserved struct name");
+        return;
+    }
+    if (!record.fields.count) {
+        fail_at(checker, record.name.offset, "struct must have at least one field");
+        return;
+    }
+
+    const AstNodeId *fields = ast->children + record.fields.first;
+    uint64_t size = 0;
+    uint32_t alignment = 1;
+    for (uint32_t i = 0; i < record.fields.count; i++) {
+        AstNodeId field = fields[i];
+        AstSpan name = node_span(ast, field);
+        for (uint32_t j = 0; j < i; j++) {
+            if (same_name(ast, name, node_span(ast, fields[j]))) {
+                fail(checker, field, "duplicate field name");
+                return;
+            }
+        }
+        AstNodeId annotation = ast->data[field].b;
+        if (ast->kinds[annotation] != AST_TYPE_NAME) {
+            fail(checker, annotation, "struct fields must be scalar");
+            return;
+        }
+        AstSpan field_type = node_span(ast, annotation);
+        TypeKind kind = scalar_type(ast, field_type);
+        if (kind == TYPE_INVALID) {
+            fail(checker, annotation, find_struct(ast, field_type) == UINT32_MAX
+                                      ? "unknown type" : "struct fields must be scalar");
+            return;
+        }
+        uint32_t width = sema_scalar_size(kind);
+        size = align_bytes(size, width);
+        if (size + width > INT32_MAX - 7u) {
+            fail(checker, field, "struct is too large for local storage");
+            return;
+        }
+        checker->sema->nodes[field].type = (SemaType){.kind = kind};
+        checker->sema->nodes[field].binding = (uint32_t)size;
+        size += width;
+        if (width > alignment) {
+            alignment = width;
+        }
+    }
+    checker->struct_sizes[index] = (uint32_t)align_bytes(size, alignment);
+}
+
 static SemaType resolve_type(Checker *checker, AstNodeId id)
 {
     if (id == AST_NODE_NONE) {
@@ -154,30 +247,35 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         if (failed(checker)) {
             return no_type;
         }
+        SemaType collection = {.kind = TYPE_SLICE, .element = element.kind,
+                               .record = element.record, .record_size = element.record_size};
         if (!data.b) {
-            return (SemaType){.kind = TYPE_SLICE, .element = element.kind};
+            return collection;
         }
 
         AstSpan count = node_span(checker->ast, data.b);
-        uint32_t limit = (INT32_MAX - 7u) / sema_scalar_size(element.kind);
+        uint32_t limit = (INT32_MAX - 7u) / sema_element_size(collection);
         uint32_t length = 0;
         for (uint32_t i = 0; i < count.length; i++) {
             unsigned digit = checker->ast->source[count.offset + i] - '0';
-            if (length > (limit - digit) / 10) {
+            if (digit > limit || length > (limit - digit) / 10) {
                 return fail(checker, data.b, "array is too large for local storage");
             }
             length = length * 10 + digit;
         }
-        return (SemaType){.kind = TYPE_ARRAY, .length = length, .element = element.kind};
+        collection.kind = TYPE_ARRAY;
+        collection.length = length;
+        return collection;
     }
     AstSpan name = node_span(checker->ast, id);
-    if (name_is(checker->ast, name, "int")) {
-        return (SemaType){.kind = TYPE_I32};
+    TypeKind kind = scalar_type(checker->ast, name);
+    if (kind != TYPE_INVALID) {
+        return (SemaType){.kind = kind};
     }
-    for (TypeKind kind = TYPE_BOOL; kind <= TYPE_F64; kind++) {
-        if (name_is(checker->ast, name, sema_type_name(kind))) {
-            return (SemaType){.kind = kind};
-        }
+    uint32_t record = find_struct(checker->ast, name);
+    if (record != UINT32_MAX) {
+        return (SemaType){.kind = TYPE_STRUCT, .record = record,
+                          .record_size = checker->struct_sizes[record]};
     }
     return fail(checker, id, "unknown type");
 }
@@ -230,17 +328,20 @@ static bool register_functions(Checker *checker)
         }
         *entry = i + 1;
         checker->sema->functions[i].result = resolve_type(checker, function.return_type);
-        if (is_array_like(checker->sema->functions[i].result.kind)) {
+        TypeKind result = checker->sema->functions[i].result.kind;
+        if (is_array_like(result) || result == TYPE_STRUCT) {
             fail(checker, function.return_type, "function results must be scalar");
         }
         for (uint32_t p = 0; p < function.parameters.count && !failed(checker); p++) {
             AstNodeId param = ast->children[function.parameters.first + p];
             AstNodeId annotation = ast->data[param].b;
             SemaType type = resolve_type(checker, annotation);
-            if (type.kind == TYPE_ARRAY) {
-                fail(checker, annotation, "pass fixed arrays through a slice parameter");
-            } else if (type.kind == TYPE_SLICE && !function.body) {
+            if (!function.body && (is_array_like(type.kind) || type.kind == TYPE_STRUCT)) {
                 fail(checker, annotation, "external parameters must be scalar");
+            } else if (type.kind == TYPE_ARRAY) {
+                fail(checker, annotation, "pass fixed arrays through a slice parameter");
+            } else if (type.kind == TYPE_STRUCT) {
+                fail(checker, annotation, "pass structs through a slice parameter");
             }
             checker->sema->nodes[param].type = type;
         }
@@ -313,7 +414,8 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
     if (type.kind == TYPE_VOID) {
         return fail(checker, id, "a value is required here");
     }
-    if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE && type.element == expected.element) {
+    if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE &&
+        type.element == expected.element && type.record == expected.record) {
         checker->sema->nodes[id].borrow_array = true;
         return expected;
     }
@@ -470,6 +572,19 @@ static bool literal_like(const Ast *ast, AstNodeId id)
     return ast->kinds[id] == AST_INTEGER || ast->kinds[id] == AST_FLOAT;
 }
 
+static bool writable_target(const Checker *checker, AstNodeId id)
+{
+    const Ast *ast = checker->ast;
+    while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
+        AstNodeId base = ast->data[id].a;
+        if (ast->kinds[id] == AST_INDEX && checker->sema->nodes[base].type.kind != TYPE_ARRAY) {
+            return false;
+        }
+        id = base;
+    }
+    return ast->kinds[id] == AST_IDENTIFIER && !checker->sema->nodes[id].is_boolean_literal;
+}
+
 static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
 {
     const Ast *ast = checker->ast;
@@ -480,16 +595,10 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         value(checker, node.b, bool_type);
         return bool_type;
     }
-    if (is_assignment(kind)) {
-        if (ast->kinds[node.a] == AST_INDEX) {
-            AstNodeId base = ast->data[node.a].a;
-            if (ast->kinds[base] != AST_IDENTIFIER) {
-                return fail(checker, node.a, "index assignment requires a local fixed array");
-            }
-        } else if (ast->kinds[node.a] != AST_IDENTIFIER ||
-                   boolean_name(ast, node_span(ast, node.a))) {
-            return fail(checker, node.a, "assignment requires a local variable or array element");
-        }
+    AstKind target = ast->kinds[node.a];
+    if (is_assignment(kind) && target != AST_INDEX && target != AST_MEMBER &&
+        (target != AST_IDENTIFIER || boolean_name(ast, node_span(ast, node.a)))) {
+        return fail(checker, node.a, "assignment requires a local variable, array element, or field");
     }
     SemaType context = !is_comparison(kind) && is_numeric(expected.kind) ? expected : no_type;
     SemaType operand;
@@ -499,14 +608,15 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         value(checker, node.a, operand);
     } else {
         operand = value(checker, node.a, context);
+        if (is_assignment(kind) && !failed(checker) && !writable_target(checker, node.a)) {
+            return fail(checker, node.a, target == AST_INDEX
+                        ? "index assignment requires a local fixed array"
+                        : "field assignment requires a local struct or fixed array element");
+        }
         value(checker, node.b, operand);
     }
     if (failed(checker)) {
         return no_type;
-    }
-    if (is_assignment(kind) && ast->kinds[node.a] == AST_INDEX &&
-        checker->sema->nodes[ast->data[node.a].a].type.kind != TYPE_ARRAY) {
-        return fail(checker, node.a, "index assignment requires a local fixed array");
     }
     if (kind == AST_ASSIGN) {
         return operand;
@@ -546,6 +656,27 @@ static SemaType check_unary(Checker *checker, AstNodeId id, SemaType expected)
     return type;
 }
 
+static SemaType check_member(Checker *checker, AstNodeId id)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    SemaType base = value(checker, node.a, no_type);
+    if (base.kind != TYPE_STRUCT) {
+        return fail(checker, id, "member access requires a struct value");
+    }
+    AstSpan name = {ast->positions[id], node.b};
+    AstNodeRange fields = ast->structs[base.record].fields;
+    for (uint32_t i = 0; i < fields.count; i++) {
+        AstNodeId field = ast->children[fields.first + i];
+        if (same_name(ast, name, node_span(ast, field))) {
+            SemaNode info = checker->sema->nodes[field];
+            checker->sema->nodes[id].binding = info.binding;
+            return info.type;
+        }
+    }
+    return fail(checker, id, "unknown struct field");
+}
+
 static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expected)
 {
     const Ast *ast = checker->ast;
@@ -567,7 +698,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (!is_array_like(base.kind) || !is_integer(index.kind)) {
             return fail(checker, id, "indexing requires an array or slice and an integer index");
         }
-        return (SemaType){.kind = base.element};
+        return (SemaType){.kind = base.element, .record = base.record, .record_size = base.record_size};
     }
     case AST_SLICE: {
         SemaType base = value(checker, node.a, no_type);
@@ -577,11 +708,11 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (!is_array_like(base.kind) || !is_integer(start.kind) || !is_integer(end.kind)) {
             return fail(checker, id, "slicing requires an array or slice and integer bounds");
         }
-        return (SemaType){.kind = TYPE_SLICE, .element = base.element};
+        return (SemaType){.kind = TYPE_SLICE, .element = base.element, .record = base.record,
+                          .record_size = base.record_size};
     }
     case AST_MEMBER:
-        value(checker, node.a, no_type);
-        return fail(checker, id, "member access requires an aggregate with declared fields");
+        return check_member(checker, id);
     case AST_POSITIVE:
     case AST_NEGATE:
     case AST_LOGICAL_NOT:
@@ -732,13 +863,25 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
 {
     *out = (Sema){0};
     *error = (SemaError){0};
-    if (ast->function_count == 0) {
+    if (ast->node_count == 0) {
         return true;
     }
     out->nodes = calloc(ast->node_count, sizeof(*out->nodes));
-    out->functions = calloc(ast->function_count, sizeof(*out->functions));
     Checker checker = {.ast = ast, .sema = out};
-    if (!out->nodes || !out->functions || !register_functions(&checker)) {
+    if (ast->function_count) {
+        out->functions = calloc(ast->function_count, sizeof(*out->functions));
+    }
+    if (ast->struct_count) {
+        checker.struct_sizes = calloc(ast->struct_count, sizeof(*checker.struct_sizes));
+    }
+    if (!out->nodes || (ast->function_count && !out->functions) ||
+        (ast->struct_count && !checker.struct_sizes)) {
+        fail_at(&checker, 0, "could not allocate semantic analysis storage");
+    }
+    for (uint32_t i = 0; i < ast->struct_count && !failed(&checker); i++) {
+        layout_struct(&checker, i);
+    }
+    if (!failed(&checker) && !register_functions(&checker)) {
         fail_at(&checker, 0, "could not allocate semantic analysis storage");
     }
     for (uint32_t i = 0; i < ast->function_count && !failed(&checker); i++) {
@@ -746,6 +889,7 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     }
     free(checker.locals);
     free(checker.function_map);
+    free(checker.struct_sizes);
     if (failed(&checker)) {
         *error = checker.error;
         sema_destroy(out);

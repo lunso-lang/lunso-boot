@@ -18,7 +18,8 @@ static const QbeType types[] = {
     [TYPE_I32] = {'w', "w", NULL}, [TYPE_U32] = {'w', "w", NULL},
     [TYPE_I64] = {'l', "l", NULL}, [TYPE_U64] = {'l', "l", NULL},
     [TYPE_F32] = {'s', "s", NULL}, [TYPE_F64] = {'d', "d", NULL},
-    [TYPE_ARRAY] = {'l', NULL, NULL}, [TYPE_SLICE] = {'l', NULL, NULL},
+    [TYPE_STRUCT] = {'l', NULL, NULL}, [TYPE_ARRAY] = {'l', NULL, NULL},
+    [TYPE_SLICE] = {'l', NULL, NULL},
 };
 
 static bool is_signed(TypeKind type)
@@ -151,7 +152,7 @@ static void write_access(FILE *out, IrInstruction inst)
     fprintf(out, "\tjnz %%in%" PRIu32 ", @array_ok%" PRIu32 ", @bounds_fail\n",
             inst.result, inst.result);
     fprintf(out, "@array_ok%" PRIu32 "\n", inst.result);
-    uint32_t size = sema_scalar_size(inst.type.element);
+    uint32_t size = sema_element_size(inst.type);
     if (size != 1) {
         fprintf(out, "\t%%off%" PRIu32 " =l mul %%v%" PRIu32 ", %" PRIu32 "\n",
                 inst.result, inst.b, size);
@@ -164,9 +165,9 @@ static void write_access(FILE *out, IrInstruction inst)
     }
 }
 
-static void write_array_init(FILE *out, IrInstruction inst, uint32_t at)
+static void write_storage_init(FILE *out, IrInstruction inst, uint32_t at)
 {
-    uint32_t bytes = inst.type.length * sema_scalar_size(inst.type.element);
+    uint32_t bytes = sema_storage_size(inst.type);
     if (!bytes) {
         return;
     }
@@ -295,11 +296,11 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
             fprintf(out, "\t%%slen%" PRIu32 " =l copy %%len%" PRIu32 "\n", inst.a, inst.b);
         }
         break;
-    case IR_ARRAY_ALLOC:
+    case IR_STORAGE_ALLOC:
         // Emitted once in the entry block.
         break;
-    case IR_ARRAY_INIT:
-        write_array_init(out, inst, index);
+    case IR_STORAGE_INIT:
+        write_storage_init(out, inst, index);
         break;
     case IR_WIDEN_INDEX:
         fprintf(out, "\t%%v%" PRIu32 " =l %s %%v%" PRIu32 "\n", inst.result,
@@ -309,11 +310,15 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
     case IR_SLICE:
         write_access(out, inst);
         break;
+    case IR_FIELD_ADDRESS:
+        fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %" PRIu32 "\n",
+                inst.result, inst.a, inst.b);
+        break;
     case IR_ARRAY_VIEW:
         fprintf(out, "\t%%v%" PRIu32 " =l copy %%v%" PRIu32 "\n", inst.result, inst.a);
         fprintf(out, "\t%%len%" PRIu32 " =l copy %" PRIu32 "\n", inst.result, inst.type.length);
         break;
-    case IR_ELEMENT_LOAD: {
+    case IR_MEMORY_LOAD: {
         QbeType type = types[inst.type.kind];
         char suffix = memory_suffix(inst.type.kind);
         const char *sign = type.extend ? (is_signed(inst.type.kind) ? "s" : "u") : "";
@@ -321,7 +326,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
                 inst.result, type.base, sign, suffix, inst.a);
         break;
     }
-    case IR_ELEMENT_STORE:
+    case IR_MEMORY_STORE:
         fprintf(out, "\tstore%c %%v%" PRIu32 ", %%v%" PRIu32 "\n",
                 memory_suffix(inst.type.kind), inst.b, inst.a);
         break;
@@ -400,8 +405,8 @@ static void write_function(FILE *out, const IrModule *module, IrFunction fn)
             }
             for (uint32_t j = 1; j < fn.instruction_count; j++) {
                 IrInstruction inst = module->instructions[fn.first_instruction + j];
-                if (inst.op == IR_ARRAY_ALLOC) {
-                    uint32_t size = inst.type.length * sema_scalar_size(inst.type.element);
+                if (inst.op == IR_STORAGE_ALLOC) {
+                    uint32_t size = sema_storage_size(inst.type);
                     fprintf(out, "\t%%v%" PRIu32 " =l %s %" PRIu32 "\n",
                             inst.result, size ? "alloc8" : "copy", size);
                 }

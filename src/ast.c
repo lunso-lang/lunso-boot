@@ -96,6 +96,23 @@ bool ast_add_function(AstBuilder *builder, AstFunction function, uint32_t *index
     return true;
 }
 
+bool ast_add_struct(AstBuilder *builder, AstStruct record, uint32_t *index)
+{
+    Ast *ast = &builder->ast;
+    if (ast->struct_count == UINT32_MAX) {
+        return false;
+    }
+    AstStruct *records = reserve(ast->structs, &builder->struct_capacity,
+                                 ast->struct_count + 1, sizeof(*records));
+    if (!records) {
+        return false;
+    }
+    ast->structs = records;
+    *index = ast->struct_count++;
+    ast->structs[*index] = record;
+    return true;
+}
+
 bool ast_add_if_branches(AstBuilder *builder, AstIfBranches branches, uint32_t *index)
 {
     Ast *ast = &builder->ast;
@@ -192,6 +209,7 @@ void ast_destroy(Ast *ast)
     free(ast->data);
     free(ast->children);
     free(ast->functions);
+    free(ast->structs);
     free(ast->if_branches);
     free(ast->for_headers);
     free(ast->variables);

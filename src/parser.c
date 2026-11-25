@@ -549,6 +549,38 @@ static AstNodeId parse_function(Parser *parser)
     return add_node(parser, AST_FUNCTION, start, index, 0);
 }
 
+static AstNodeId parse_struct(Parser *parser)
+{
+    Token keyword = expect(parser, TOKEN_STRUCT, "expected 'struct'");
+    Token name = expect(parser, TOKEN_IDENTIFIER, "expected a struct name");
+    expect(parser, TOKEN_LEFT_BRACE, "expected '{' after struct name");
+    uint32_t mark = parser->builder.pending_count;
+    while (!failed(parser) && is_separator(parser->current.kind)) {
+        advance(parser);
+    }
+    while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_BRACE &&
+           parser->current.kind != TOKEN_EOF) {
+        Token field = expect(parser, TOKEN_IDENTIFIER, "expected a field name");
+        expect(parser, TOKEN_COLON, "expected ':' after field name");
+        AstNodeId type = parse_type(parser);
+        push_child(parser, add_node(parser, AST_FIELD, field, (uint32_t)field.length, type));
+        if (parser->current.kind == TOKEN_EOF) {
+            break;
+        }
+        finish_item(parser, TOKEN_RIGHT_BRACE, "expected a newline, ';', or '}' after field");
+    }
+    expect(parser, TOKEN_RIGHT_BRACE, "expected '}' to end struct");
+    AstStruct record = {
+        .name = {(uint32_t)name.offset, (uint32_t)name.length},
+        .fields = finish_children(parser, mark),
+    };
+    uint32_t index = 0;
+    if (!failed(parser) && !ast_add_struct(&parser->builder, record, &index)) {
+        fail(parser, "could not allocate AST storage");
+    }
+    return add_node(parser, AST_STRUCT, keyword, index, 0);
+}
+
 bool parser_parse(const unsigned char *source, size_t length, Ast *out, ParseError *error)
 {
     *out = (Ast){0};
@@ -570,8 +602,10 @@ bool parser_parse(const unsigned char *source, size_t length, Ast *out, ParseErr
         advance(&parser);
     }
     while (!failed(&parser) && parser.current.kind != TOKEN_EOF) {
-        push_child(&parser, parse_function(&parser));
-        finish_item(&parser, TOKEN_EOF, "expected a newline or ';' after function");
+        bool record = parser.current.kind == TOKEN_STRUCT;
+        push_child(&parser, record ? parse_struct(&parser) : parse_function(&parser));
+        finish_item(&parser, TOKEN_EOF, record ? "expected a newline or ';' after struct"
+                                              : "expected a newline or ';' after function");
     }
     parser.builder.ast.declarations = finish_children(&parser, 0);
     free(parser.builder.pending);

@@ -22,6 +22,7 @@ typedef struct {
     uint32_t binding;  // Local slot, or function index on AST_CALL.
     bool is_boolean_literal;
     bool is_builtin_len;
+    bool borrow_array;  // The expression's fixed array is used as a full slice.
     bool falls_through;
 } SemaNode;
 

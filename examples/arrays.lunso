@@ -21,5 +21,9 @@ fun main(): i32 {
     if count_newlines(part) != 2 {
         return 2
     }
+    var text: []u8 = "cos"
+    if len(text) != 3 || count_newlines("co\ns") != 1 {
+        return 3
+    }
     return 0
 }

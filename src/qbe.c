@@ -309,6 +309,10 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index)
     case IR_SLICE:
         write_access(out, inst);
         break;
+    case IR_ARRAY_VIEW:
+        fprintf(out, "\t%%v%" PRIu32 " =l copy %%v%" PRIu32 "\n", inst.result, inst.a);
+        fprintf(out, "\t%%len%" PRIu32 " =l copy %" PRIu32 "\n", inst.result, inst.type.length);
+        break;
     case IR_ELEMENT_LOAD: {
         QbeType type = types[inst.type.kind];
         char suffix = memory_suffix(inst.type.kind);

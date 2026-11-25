@@ -247,7 +247,7 @@ static uint32_t number(Lowering *lowering, AstNodeId id, bool negative)
                       lowering->ast->positions[id], lowering->ast->data[id].a, negative);
 }
 
-static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
+static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
 {
     if (lowering->failed) {
         return 0;
@@ -293,6 +293,16 @@ static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
     default:
         return lower_binary(lowering, id);
     }
+}
+
+static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
+{
+    uint32_t value = lower_unconverted_expression(lowering, id);
+    SemaNode info = lowering->sema->nodes[id];
+    if (info.borrow_array) {
+        return emit_value(lowering, IR_ARRAY_VIEW, info.type, value, 0, 0);
+    }
+    return value;
 }
 
 static void lower_if(Lowering *lowering, AstNodeId id)

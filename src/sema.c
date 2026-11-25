@@ -313,6 +313,10 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
     if (type.kind == TYPE_VOID) {
         return fail(checker, id, "a value is required here");
     }
+    if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE && type.element == expected.element) {
+        checker->sema->nodes[id].borrow_array = true;
+        return expected;
+    }
     if (expected.kind != TYPE_INVALID && !same_type(type, expected)) {
         return fail(checker, id, "type mismatch");
     }

@@ -125,8 +125,10 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
     case IR_WIDEN_INDEX:
     case IR_LEN:
     case IR_ELEMENT_LOAD:
+    case IR_ARRAY_VIEW:
         fputs(instruction.op == IR_LEN ? "len." :
-              instruction.op == IR_WIDEN_INDEX ? "widen_index." : "load_element.", output);
+              instruction.op == IR_WIDEN_INDEX ? "widen_index." :
+              instruction.op == IR_ARRAY_VIEW ? "array_view." : "load_element.", output);
         write_type(output, instruction.type);
         fputc(' ', output);
         write_value(output, instruction.a);

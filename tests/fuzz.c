@@ -185,7 +185,7 @@ static void emit_expr(StrBuf *sb, int depth)
         return;
     }
 
-    switch (rng_range(9)) {
+    switch (rng_range(11)) {
     case 0:
     case 1:
         emit_expr(sb, 0);
@@ -234,6 +234,18 @@ static void emit_expr(StrBuf *sb, int depth)
         sb_append(sb, ")");
         break;
     }
+    case 9:
+        sb_append(sb, "[");
+        emit_expr(sb, depth - 1);
+        sb_append(sb, ", ");
+        emit_expr(sb, depth - 1);
+        sb_append(sb, "]");
+        break;
+    case 10:
+        sb_append(sb, "(S { f0: ");
+        emit_expr(sb, depth - 1);
+        sb_append(sb, " })");
+        break;
     }
 }
 
@@ -357,7 +369,7 @@ static void gen_valid_program(StrBuf *sb)
 static void gen_invalid_program(StrBuf *sb)
 {
     sb->len = 0;
-    switch (rng_range(10)) {
+    switch (rng_range(11)) {
     case 0:
         sb_append(sb, "fun main( { }\n");
         break;
@@ -387,6 +399,9 @@ static void gen_invalid_program(StrBuf *sb)
         break;
     case 9:
         sb_append(sb, "fun main(): i32 {\n    return x.\n}\n");
+        break;
+    case 10:
+        sb_append(sb, "fun main(): i32 {\n    var a = []\n    return 0\n}\n");
         break;
     }
 }

@@ -46,6 +46,9 @@ enum {
     AST_INTEGER,     // a: raw literal length in bytes
     AST_FLOAT,       // a: raw literal length in bytes
     AST_STRING,      // a: raw literal length in bytes, including quotes
+    AST_ARRAY_LITERAL,       // a: first item in children, b: item count
+    AST_STRUCT_LITERAL,      // a: first item in children, b: item count (type, then field inits)
+    AST_STRUCT_FIELD_INIT,   // a: field name length, b: value node
     AST_CALL,        // a: first item in children, b: item count (callee, then arguments)
     AST_INDEX,       // a: base node, b: index expression node
     AST_SLICE,       // a: base node, b: range node

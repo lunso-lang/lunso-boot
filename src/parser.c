@@ -13,6 +13,7 @@ typedef struct {
     uint32_t module;
     unsigned group_depth;
     unsigned recursion_depth;
+    bool disallow_struct_literal;
 } Parser;
 
 enum {
@@ -222,6 +223,54 @@ static AstNodeId parse_call(Parser *parser, AstNodeId callee)
     return add_node(parser, AST_CALL, opening, items.first, items.count);
 }
 
+static AstNodeId parse_struct_literal(Parser *parser, AstNodeId type_expr)
+{
+    Token opening = parser->current;
+    uint32_t mark = parser->builder->pending_count;
+    push_child(parser, type_expr);
+    open_group(parser);
+    bool saved = parser->disallow_struct_literal;
+    parser->disallow_struct_literal = false;
+    while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_BRACE &&
+           parser->current.kind != TOKEN_EOF) {
+        Token field = expect(parser, TOKEN_IDENTIFIER, "expected field name in struct initializer");
+        expect(parser, TOKEN_COLON, "expected ':' after field name");
+        AstNodeId value = parse_expression(parser, PREC_ASSIGNMENT);
+        push_child(parser, add_node(parser, AST_STRUCT_FIELD_INIT, field,
+                                    (uint32_t)field.length, value));
+        if (!match(parser, TOKEN_COMMA)) {
+            break;
+        }
+    }
+    parser->disallow_struct_literal = saved;
+    close_group(parser, TOKEN_RIGHT_BRACE, "expected '}' after struct initializer");
+    AstNodeRange items = finish_children(parser, mark);
+    return add_node(parser, AST_STRUCT_LITERAL, opening, items.first, items.count);
+}
+
+static AstNodeId parse_array_literal(Parser *parser)
+{
+    Token opening = parser->current;
+    uint32_t mark = parser->builder->pending_count;
+    open_group(parser);
+    bool saved = parser->disallow_struct_literal;
+    parser->disallow_struct_literal = false;
+    while (!failed(parser) && parser->current.kind != TOKEN_RIGHT_BRACKET &&
+           parser->current.kind != TOKEN_EOF) {
+        push_child(parser, parse_expression(parser, PREC_ASSIGNMENT));
+        if (!match(parser, TOKEN_COMMA)) {
+            break;
+        }
+    }
+    parser->disallow_struct_literal = saved;
+    close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after array initializer");
+    AstNodeRange items = finish_children(parser, mark);
+    if (!failed(parser) && items.count == 0) {
+        fail(parser, "array initializer cannot be empty");
+    }
+    return add_node(parser, AST_ARRAY_LITERAL, opening, items.first, items.count);
+}
+
 static AstNodeId parse_postfix(Parser *parser, AstNodeId base)
 {
     while (!failed(parser)) {
@@ -230,6 +279,15 @@ static AstNodeId parse_postfix(Parser *parser, AstNodeId base)
         case TOKEN_LEFT_PAREN:
             base = parse_call(parser, base);
             break;
+        case TOKEN_LEFT_BRACE: {
+            AstKind base_kind = base ? parser->builder->ast.kinds[base] : AST_INVALID;
+            if (parser->disallow_struct_literal ||
+                (base_kind != AST_IDENTIFIER && base_kind != AST_MEMBER)) {
+                return base;
+            }
+            base = parse_struct_literal(parser, base);
+            break;
+        }
         case TOKEN_LEFT_BRACKET: {
             open_group(parser);
             AstNodeId index = parse_expression(parser, PREC_ASSIGNMENT);
@@ -284,10 +342,15 @@ static AstNodeId parse_operand(Parser *parser)
         break;
     case TOKEN_LEFT_PAREN: {
         open_group(parser);
+        bool saved = parser->disallow_struct_literal;
+        parser->disallow_struct_literal = false;
         AstNodeId value = parse_expression(parser, PREC_ASSIGNMENT);
+        parser->disallow_struct_literal = saved;
         close_group(parser, TOKEN_RIGHT_PAREN, "expected ')' after expression");
         return parse_postfix(parser, value);
     }
+    case TOKEN_LEFT_BRACKET:
+        return parse_postfix(parser, parse_array_literal(parser));
     case TOKEN_IDENTIFIER:
     case TOKEN_INTEGER:
     case TOKEN_CHAR:
@@ -376,7 +439,10 @@ static AstNodeId parse_if(Parser *parser)
         return AST_NODE_NONE;
     }
     Token keyword = expect(parser, TOKEN_IF, "expected 'if'");
+    bool saved = parser->disallow_struct_literal;
+    parser->disallow_struct_literal = true;
     AstNodeId condition = parse_expression(parser, PREC_ASSIGNMENT);
+    parser->disallow_struct_literal = saved;
     AstIfBranches branches = {.then_branch = parse_block(parser)};
     if (match_else(parser)) {
         branches.else_branch = parser->current.kind == TOKEN_IF
@@ -469,6 +535,8 @@ static AstNodeId parse_for(Parser *parser)
     }
 
     bool declares_variable = parser->current.kind == TOKEN_VAR;
+    bool saved = parser->disallow_struct_literal;
+    parser->disallow_struct_literal = true;
     AstNodeId first = AST_NODE_NONE;
     if (declares_variable) {
         first = parse_variable(parser);
@@ -477,6 +545,7 @@ static AstNodeId parse_for(Parser *parser)
     }
 
     if (!match(parser, TOKEN_SEMICOLON)) {
+        parser->disallow_struct_literal = saved;
         if (declares_variable) {
             fail(parser, "expected ';' after for initializer");
         }
@@ -492,6 +561,7 @@ static AstNodeId parse_for(Parser *parser)
     if (parser->current.kind != TOKEN_LEFT_BRACE) {
         header.step = parse_expression(parser, PREC_ASSIGNMENT);
     }
+    parser->disallow_struct_literal = saved;
     AstNodeId body = parse_block(parser);
 
     uint32_t index = 0;

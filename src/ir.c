@@ -303,6 +303,42 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         return number(lowering, id, false);
     case AST_STRING:
         return emit_value(lowering, IR_BYTES, info.type, ast->positions[id], data.a, 0);
+    case AST_ARRAY_LITERAL: {
+        uint32_t address = emit_value(lowering, IR_STORAGE_ALLOC, info.type, 0, 0, 0);
+        SemaType elem_type = {.kind = info.type.element, .record = info.type.record,
+                              .record_size = info.type.record_size, .pointee = info.type.pointee,
+                              .read_only = info.type.read_only};
+        for (uint32_t i = 0; i < data.b && !lowering->failed; i++) {
+            uint32_t idx = emit_value(lowering, IR_IMMEDIATE, (SemaType){.kind = TYPE_I64}, i, 0, 0);
+            uint32_t elem_addr = emit_value(lowering, IR_ELEMENT_ADDRESS, info.type, address, idx, 0);
+            uint32_t val = lower_expression(lowering, ast->children[data.a + i]);
+            if (uses_storage(elem_type)) {
+                init_storage(lowering, elem_type, elem_addr, val);
+            } else {
+                emit(lowering, (IrInstruction){.op = IR_MEMORY_STORE, .type = elem_type,
+                                               .a = elem_addr, .b = val});
+            }
+        }
+        return address;
+    }
+    case AST_STRUCT_LITERAL: {
+        uint32_t address = emit_value(lowering, IR_STORAGE_ALLOC, info.type, 0, 0, 0);
+        init_storage(lowering, info.type, address, 0);
+        for (uint32_t i = 1; i < data.b && !lowering->failed; i++) {
+            AstNodeId init = ast->children[data.a + i];
+            SemaNode field_info = lowering->sema->nodes[init];
+            uint32_t field_addr = emit_value(lowering, IR_FIELD_ADDRESS, field_info.type,
+                                             address, field_info.binding, 0);
+            uint32_t val = lower_expression(lowering, ast->data[init].b);
+            if (uses_storage(field_info.type)) {
+                init_storage(lowering, field_info.type, field_addr, val);
+            } else {
+                emit(lowering, (IrInstruction){.op = IR_MEMORY_STORE, .type = field_info.type,
+                                               .a = field_addr, .b = val});
+            }
+        }
+        return address;
+    }
     case AST_CALL:
         return lower_call(lowering, id);
     case AST_CAST: {

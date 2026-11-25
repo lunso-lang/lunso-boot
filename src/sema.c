@@ -1174,6 +1174,122 @@ static SemaType check_cast(Checker *checker, AstNodeId id)
     return fail(checker, id, "unsupported cast between these types");
 }
 
+static uint32_t resolve_struct_expr(Checker *checker, AstNodeId base)
+{
+    const Ast *ast = checker->ast;
+    AstKind kind = ast->kinds[base];
+    if (kind == AST_IDENTIFIER) {
+        AstSpan name = node_span(ast, base);
+        const AstBinding *binding = ast_imported(ast, checker->module, name);
+        if (binding && binding->kind == BIND_STRUCT) {
+            return binding->index;
+        }
+        uint32_t record = find_struct(ast, checker->module, name);
+        if (record != UINT32_MAX) {
+            return record;
+        }
+    } else if (kind == AST_MEMBER) {
+        const AstQualified *qualified = ast_qualified(ast, base);
+        if (qualified && qualified->kind == BIND_STRUCT) {
+            if (qualified->inaccessible) {
+                fail(checker, base, "cannot access a private struct");
+                return UINT32_MAX;
+            }
+            return qualified->index;
+        }
+    }
+    fail(checker, base, "expected a struct type");
+    return UINT32_MAX;
+}
+
+static SemaType check_struct_literal(Checker *checker, AstNodeId id)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    uint32_t record = resolve_struct_expr(checker, ast->children[node.a]);
+    if (record == UINT32_MAX) {
+        return no_type;
+    }
+
+    AstNodeRange fields = ast->structs[record].fields;
+    for (uint32_t i = 1; i < node.b && !failed(checker); i++) {
+        AstNodeId init = ast->children[node.a + i];
+        AstSpan name = {ast->positions[init], ast->data[init].a};
+
+        for (uint32_t j = 1; j < i; j++) {
+            AstNodeId prev = ast->children[node.a + j];
+            AstSpan prev_name = {ast->positions[prev], ast->data[prev].a};
+            if (same_name(ast, name, prev_name)) {
+                return fail(checker, init, "duplicate struct field");
+            }
+        }
+
+        AstNodeId matched = AST_NODE_NONE;
+        for (uint32_t f = 0; f < fields.count; f++) {
+            AstNodeId field = ast->children[fields.first + f];
+            if (same_name(ast, name, node_span(ast, field))) {
+                matched = field;
+                break;
+            }
+        }
+        if (!matched) {
+            return fail(checker, init, "unknown struct field");
+        }
+        SemaNode info = checker->sema->nodes[matched];
+        checker->sema->nodes[init].binding = info.binding;
+        checker->sema->nodes[init].type = info.type;
+        value(checker, ast->data[init].b, info.type);
+    }
+
+    return (SemaType){.kind = TYPE_STRUCT, .record = record,
+                      .record_size = checker->struct_sizes[record]};
+}
+
+static SemaType check_array_literal(Checker *checker, AstNodeId id, SemaType expected)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    uint32_t count = node.b;
+    SemaType elem_expected = no_type;
+    if (expected.kind == TYPE_ARRAY) {
+        if (count != expected.length) {
+            return fail(checker, id, "array initializer length mismatch");
+        }
+        elem_expected = element_type(expected);
+    } else if (expected.kind == TYPE_SLICE) {
+        elem_expected = element_type(expected);
+    }
+
+    SemaType elem_type;
+    if (elem_expected.kind != TYPE_INVALID) {
+        for (uint32_t i = 0; i < count && !failed(checker); i++) {
+            value(checker, ast->children[node.a + i], elem_expected);
+        }
+        elem_type = elem_expected;
+    } else {
+        elem_type = value(checker, ast->children[node.a], no_type);
+        if (failed(checker)) {
+            return no_type;
+        }
+        if (is_array_like(elem_type.kind) || elem_type.kind == TYPE_VOID) {
+            return fail(checker, ast->children[node.a],
+                        "collection elements must have a scalar or struct type");
+        }
+        for (uint32_t i = 1; i < count && !failed(checker); i++) {
+            value(checker, ast->children[node.a + i], elem_type);
+        }
+    }
+
+    SemaType result = {.kind = TYPE_ARRAY, .length = count, .element = elem_type.kind,
+                       .record = elem_type.record, .record_size = elem_type.record_size,
+                       .pointee = elem_type.pointee, .read_only = elem_type.read_only};
+    uint32_t elem_size = sema_element_size(result);
+    if (elem_size && count > (INT32_MAX - 7u) / elem_size) {
+        return fail(checker, id, "array is too large for local storage");
+    }
+    return result;
+}
+
 static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expected)
 {
     const Ast *ast = checker->ast;
@@ -1187,6 +1303,10 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         return float_literal(checker, id, expected);
     case AST_STRING:
         return string_literal(checker, id);
+    case AST_ARRAY_LITERAL:
+        return check_array_literal(checker, id, expected);
+    case AST_STRUCT_LITERAL:
+        return check_struct_literal(checker, id);
     case AST_CALL:
         return check_call(checker, id);
     case AST_INDEX: {

@@ -299,6 +299,21 @@ static uint64_t align_bytes(uint64_t size, uint32_t alignment)
 
 enum { STRUCT_UNVISITED = 0, STRUCT_VISITING = 1, STRUCT_DONE = 2 };
 
+static bool resolve_array_length(Checker *checker, AstNodeId count_node,
+                                 uint32_t elem_size, uint32_t *out_length)
+{
+    AstSpan count = node_span(checker->ast, count_node);
+    uint64_t value = 0;
+    uint32_t limit = elem_size ? (INT32_MAX - 7u) / elem_size : INT32_MAX - 7u;
+    if (!literal_integer_value(checker->ast->source + count.offset, count.length, &value) ||
+        value > limit) {
+        fail(checker, count_node, "array is too large for local storage");
+        return false;
+    }
+    *out_length = (uint32_t)value;
+    return true;
+}
+
 static void layout_struct(Checker *checker, uint32_t index)
 {
     if (checker->struct_state[index] == STRUCT_DONE) {
@@ -342,36 +357,88 @@ static void layout_struct(Checker *checker, uint32_t index)
         AstNodeId annotation = ast->data[field].b;
         AstKind annotation_kind = ast->kinds[annotation];
         if (annotation_kind != AST_TYPE_NAME && annotation_kind != AST_POINTER_TYPE &&
-            annotation_kind != AST_QUALIFIED_TYPE) {
-            fail(checker, annotation, "struct fields must be scalar or struct");
+            annotation_kind != AST_QUALIFIED_TYPE && annotation_kind != AST_ARRAY_TYPE) {
+            fail(checker, annotation, "struct fields must be scalar, struct, or fixed array");
             checker->module = saved_module;
             return;
         }
-        SemaType type = annotation_kind == AST_POINTER_TYPE ? (SemaType){.kind = TYPE_POINTER}
-                                                            : resolve_type(checker, annotation);
-        if (type.kind == TYPE_INVALID || failed(checker)) {
-            checker->module = saved_module;
-            return;
-        }
+        SemaType type = {.kind = TYPE_INVALID};
         uint32_t width = 0;
         uint32_t field_align = 1;
-        if (type.kind == TYPE_STRUCT) {
-            layout_struct(checker, type.record);
-            if (failed(checker)) {
-                checker->module = saved_module;
-                return;
-            }
-            type.record_size = checker->struct_sizes[type.record];
-            width = type.record_size;
-            field_align = checker->struct_alignments[type.record];
-        } else {
-            width = sema_scalar_size(type.kind);
-            if (!width) {
-                fail(checker, annotation, "struct fields must be scalar or struct");
-                checker->module = saved_module;
-                return;
-            }
+        if (annotation_kind == AST_POINTER_TYPE) {
+            type = (SemaType){.kind = TYPE_POINTER};
+            width = sema_scalar_size(TYPE_POINTER);
             field_align = width;
+        } else if (annotation_kind == AST_ARRAY_TYPE) {
+            AstNodeData arr = ast->data[annotation];
+            if (!arr.b) {
+                fail(checker, annotation, "struct fields cannot be slices");
+                checker->module = saved_module;
+                return;
+            }
+            AstKind elem_kind = ast->kinds[arr.a];
+            SemaType element = {.kind = TYPE_POINTER};
+            uint32_t elem_size = sema_scalar_size(TYPE_POINTER);
+            uint32_t elem_align = elem_size;
+            if (elem_kind != AST_POINTER_TYPE) {
+                element = resolve_type(checker, arr.a);
+                if (element.kind == TYPE_INVALID || failed(checker)) {
+                    checker->module = saved_module;
+                    return;
+                }
+                if (is_array_like(element.kind) || element.kind == TYPE_VOID) {
+                    fail(checker, arr.a, "collection elements must have a scalar or struct type");
+                    checker->module = saved_module;
+                    return;
+                }
+                if (element.kind == TYPE_STRUCT) {
+                    layout_struct(checker, element.record);
+                    if (failed(checker)) {
+                        checker->module = saved_module;
+                        return;
+                    }
+                    element.record_size = checker->struct_sizes[element.record];
+                    elem_size = element.record_size;
+                    elem_align = checker->struct_alignments[element.record];
+                } else {
+                    elem_size = sema_scalar_size(element.kind);
+                    elem_align = elem_size;
+                }
+            }
+            uint32_t length = 0;
+            if (!resolve_array_length(checker, arr.b, elem_size, &length)) {
+                checker->module = saved_module;
+                return;
+            }
+            type = (SemaType){.kind = TYPE_ARRAY, .length = length, .element = element.kind,
+                              .record = element.record, .record_size = element.record_size,
+                              .pointee = element.pointee, .read_only = element.read_only};
+            width = length * elem_size;
+            field_align = elem_align;
+        } else {
+            type = resolve_type(checker, annotation);
+            if (type.kind == TYPE_INVALID || failed(checker)) {
+                checker->module = saved_module;
+                return;
+            }
+            if (type.kind == TYPE_STRUCT) {
+                layout_struct(checker, type.record);
+                if (failed(checker)) {
+                    checker->module = saved_module;
+                    return;
+                }
+                type.record_size = checker->struct_sizes[type.record];
+                width = type.record_size;
+                field_align = checker->struct_alignments[type.record];
+            } else {
+                width = sema_scalar_size(type.kind);
+                if (!width) {
+                    fail(checker, annotation, "struct fields must be scalar, struct, or fixed array");
+                    checker->module = saved_module;
+                    return;
+                }
+                field_align = width;
+            }
         }
         size = align_bytes(size, field_align);
         if (size + width > INT32_MAX - 7u) {
@@ -429,15 +496,10 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
             return collection;
         }
 
-        AstSpan count = node_span(checker->ast, data.b);
-        uint32_t limit = (INT32_MAX - 7u) / sema_element_size(collection);
+        uint32_t elem_size = sema_element_size(collection);
         uint32_t length = 0;
-        for (uint32_t i = 0; i < count.length; i++) {
-            unsigned digit = checker->ast->source[count.offset + i] - '0';
-            if (digit > limit || length > (limit - digit) / 10) {
-                return fail(checker, data.b, "array is too large for local storage");
-            }
-            length = length * 10 + digit;
+        if (!elem_size || !resolve_array_length(checker, data.b, elem_size, &length)) {
+            return no_type;
         }
         collection.kind = TYPE_ARRAY;
         collection.length = length;
@@ -475,7 +537,9 @@ static void resolve_pointer_fields(Checker *checker, AstStruct record)
     for (uint32_t i = 0; i < record.fields.count && !failed(checker); i++) {
         AstNodeId field = ast->children[record.fields.first + i];
         AstNodeId annotation = ast->data[field].b;
-        if (ast->kinds[annotation] == AST_POINTER_TYPE) {
+        if (ast->kinds[annotation] == AST_POINTER_TYPE ||
+            (ast->kinds[annotation] == AST_ARRAY_TYPE &&
+             ast->kinds[ast->data[annotation].a] == AST_POINTER_TYPE)) {
             checker->sema->nodes[field].type = resolve_type(checker, annotation);
         }
     }

@@ -1,0 +1,40 @@
+ext fun putchar(character: i32): i32
+
+struct Item {
+    unit_price: i32
+    stock: i32
+}
+
+fun inventory_value(items: []Item): i32 {
+    var total: i32 = 0
+    for var i: i64 = 0; i < len(items); i += 1 {
+        total += items[i].stock * items[i].unit_price
+    }
+    return total
+}
+
+fun print_nonnegative(value: i32) {
+    if value >= 10 {
+        print_nonnegative(value / 10)
+    }
+    putchar(48 + value % 10)
+}
+
+fun main(): i32 {
+    var items: [2]Item
+
+    var shipment: Item
+    shipment.unit_price = 12
+    shipment.stock = 5
+    items[0] = shipment
+
+    items[1].unit_price = 8
+    items[1].stock = 4
+
+    // One unit was sold from the first item.
+    items[0].stock -= 1
+
+    print_nonnegative(inventory_value(items))
+    putchar(10)
+    return 0
+}

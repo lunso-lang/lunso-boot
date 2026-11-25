@@ -1,11 +1,14 @@
 #include "lexer.h"
 #include "parser.h"
+#include "sema.h"
 
 #include <inttypes.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK } Mode;
 
 static unsigned char *read_source(FILE *file, size_t *length)
 {
@@ -153,7 +156,24 @@ static int dump_tokens(const char *path, const unsigned char *source, size_t len
     }
 }
 
-static int parse_source(const char *path, const unsigned char *source, size_t length)
+static int report_offset_error(const char *path, const unsigned char *source, SemaError error)
+{
+    Token token = {.line = 1, .column = 1};
+    for (uint32_t i = 0; i < error.offset; i++) {
+        if (source[i] == '\r' || source[i] == '\n') {
+            if (source[i] == '\r' && i + 1 < error.offset && source[i + 1] == '\n') {
+                i++;
+            }
+            token.line++;
+            token.column = 1;
+        } else {
+            token.column++;
+        }
+    }
+    return report_source_error(path, source, token, error.message);
+}
+
+static int process_source(Mode mode, const char *path, const unsigned char *source, size_t length)
 {
     Ast ast;
     ParseError error;
@@ -161,22 +181,38 @@ static int parse_source(const char *path, const unsigned char *source, size_t le
         return report_source_error(path, source, error.token, error.message);
     }
 
-    uint32_t nodes = ast.node_count ? ast.node_count - 1 : 0;
-    printf("Parsed %" PRIu32 " function(s), %" PRIu32 " AST node(s)\n",
-           ast.function_count, nodes);
+    if (mode == MODE_CHECK) {
+        Sema sema;
+        SemaError semantic_error;
+        if (!sema_check(&ast, &sema, &semantic_error)) {
+            ast_destroy(&ast);
+            return report_offset_error(path, source, semantic_error);
+        }
+        printf("Checked %" PRIu32 " function(s)\n", ast.function_count);
+        sema_destroy(&sema);
+    } else {
+        uint32_t nodes = ast.node_count ? ast.node_count - 1 : 0;
+        printf("Parsed %" PRIu32 " function(s), %" PRIu32 " AST node(s)\n",
+               ast.function_count, nodes);
+    }
     ast_destroy(&ast);
     return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 int main(int argc, char **argv)
 {
-    bool parse = argc > 1 && strcmp(argv[1], "--parse") == 0;
-    if (argc != (parse ? 3 : 2)) {
-        fprintf(stderr, "usage: %s [--parse] <source.lunso>\n", argv[0]);
+    Mode mode = MODE_TOKENS;
+    if (argc > 1 && strcmp(argv[1], "--parse") == 0) {
+        mode = MODE_PARSE;
+    } else if (argc > 1 && strcmp(argv[1], "--check") == 0) {
+        mode = MODE_CHECK;
+    }
+    if (argc != (mode == MODE_TOKENS ? 2 : 3)) {
+        fprintf(stderr, "usage: %s [--parse | --check] <source.lunso>\n", argv[0]);
         return EXIT_FAILURE;
     }
 
-    const char *path = argv[parse ? 2 : 1];
+    const char *path = argv[mode == MODE_TOKENS ? 1 : 2];
     FILE *file = fopen(path, "rb");
     if (!file) {
         perror(path);
@@ -191,7 +227,8 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    int result = parse ? parse_source(path, source, length) : dump_tokens(path, source, length);
+    int result = mode == MODE_TOKENS ? dump_tokens(path, source, length)
+                                     : process_source(mode, path, source, length);
     free(source);
     return result;
 }

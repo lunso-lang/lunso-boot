@@ -366,7 +366,7 @@ static AstNodeId parse_type(Parser *parser)
     return add_node(parser, AST_TYPE_NAME, type, (uint32_t)type.length, 0);
 }
 
-static AstNodeId parse_for_variable(Parser *parser)
+static AstNodeId parse_variable(Parser *parser)
 {
     advance(parser);
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a variable name after 'var'");
@@ -395,7 +395,7 @@ static AstNodeId parse_for(Parser *parser)
     bool declares_variable = parser->current.kind == TOKEN_VAR;
     AstNodeId first = AST_NODE_NONE;
     if (declares_variable) {
-        first = parse_for_variable(parser);
+        first = parse_variable(parser);
     } else if (parser->current.kind != TOKEN_SEMICOLON) {
         first = parse_expression(parser, PREC_ASSIGNMENT);
     }
@@ -433,6 +433,8 @@ static AstNodeId parse_statement(Parser *parser)
         return parse_if(parser);
     case TOKEN_FOR:
         return parse_for(parser);
+    case TOKEN_VAR:
+        return parse_variable(parser);
     case TOKEN_RETURN: {
         advance(parser);
         TokenKind next = parser->current.kind;

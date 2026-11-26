@@ -5,6 +5,46 @@ pub fun read_into(buffer: *u8, capacity: u64): i64 {
     return lunso_sys_read(0, buffer, capacity)
 }
 
+pub fun read_line(buffer: *u8, capacity: u64, out: *[]u8): i64 {
+    if capacity == 0 || (buffer as u64) == 0 || (out as u64) == 0 {
+        return -22
+    }
+    var n: u64 = 0
+    for {
+        var b: u8 = 0
+        var r = lunso_sys_read(0, &b, 1)
+        for r == -4 {
+            r = lunso_sys_read(0, &b, 1)
+        }
+        if r < 0 {
+            return r
+        }
+        if r == 0 {
+            if n == 0 {
+                *out = buffer[0..0]
+                return 0
+            }
+            if n > 0 && buffer[n - 1] == '\r' {
+                n -= 1
+            }
+            *out = buffer[0..n]
+            return 1
+        }
+        if b == '\n' {
+            if n > 0 && buffer[n - 1] == '\r' {
+                n -= 1
+            }
+            *out = buffer[0..n]
+            return 1
+        }
+        if n >= capacity {
+            return -75
+        }
+        buffer[n] = b
+        n += 1
+    }
+}
+
 pub fun write_bytes(fd: i32, bytes: []u8): i64 {
     return lunso_sys_write(fd, data(bytes), len(bytes) as u64)
 }

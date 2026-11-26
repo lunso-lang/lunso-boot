@@ -415,19 +415,9 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
     case IR_BOOL:
     case IR_IMMEDIATE: {
         uint64_t bits = ((uint64_t)inst.b << 32) | inst.a;
-        fprintf(out, "\t%%v%" PRIu32 " =%c copy ", inst.result, types[inst.type.kind].base);
-        if (inst.type.kind == TYPE_F32) {
-            uint32_t raw = (uint32_t)bits;
-            float value;
-            memcpy(&value, &raw, sizeof(value));
-            fprintf(out, "s_%.9g", (double)value);
-        } else if (inst.type.kind == TYPE_F64) {
-            double value;
-            memcpy(&value, &bits, sizeof(value));
-            fprintf(out, "d_%.17g", value);
-        } else {
-            write_integer_bits(out, bits);
-        }
+        const char *op = (inst.type.kind == TYPE_F32 || inst.type.kind == TYPE_F64) ? "cast" : "copy";
+        fprintf(out, "\t%%v%" PRIu32 " =%c %s ", inst.result, types[inst.type.kind].base, op);
+        write_integer_bits(out, bits);
         fputc('\n', out);
         if (inst.type.kind == TYPE_SLICE) {
             fprintf(out, "\t%%len%" PRIu32 " =l copy 0\n", inst.result);

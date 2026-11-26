@@ -67,8 +67,7 @@ fun main(): i32 {
         return 11
     }
     for var j: u64 = 0; j < 10; j += 1 {
-        var t = Token { kind: (j as i32) + 1, offset: j * 4, size: 2 }
-        if vec.push.[Token](&tokens, &t) < 0 {
+        if vec.push_value.[Token](&tokens, Token { kind: (j as i32) + 1, offset: j * 4, size: 2 }) < 0 {
             mem.deinit(&arena)
             return 12
         }

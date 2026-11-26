@@ -19,7 +19,7 @@ static const QbeType types[] = {
     [TYPE_I32] = {'w', "w", NULL}, [TYPE_U32] = {'w', "w", NULL},
     [TYPE_I64] = {'l', "l", NULL}, [TYPE_U64] = {'l', "l", NULL},
     [TYPE_F32] = {'s', "s", NULL}, [TYPE_F64] = {'d', "d", NULL},
-    [TYPE_STRUCT] = {'l', NULL, NULL}, [TYPE_ARRAY] = {'l', NULL, NULL},
+    [TYPE_STRUCT] = {'l', "l", NULL}, [TYPE_ARRAY] = {'l', NULL, NULL},
     [TYPE_SLICE] = {'l', NULL, NULL},
     [TYPE_POINTER] = {'l', "l", NULL},
 };
@@ -605,7 +605,24 @@ static bool write_function(FILE *out, const IrModule *module, uint32_t index)
                 }
             }
             for (uint32_t p = 0; p < fn.parameter_count; p++) {
-                TypeKind kind = module->parameters[fn.first_parameter + p].kind;
+                SemaType parameter = module->parameters[fn.first_parameter + p];
+                TypeKind kind = parameter.kind;
+                if (kind == TYPE_STRUCT) {
+                    uint32_t size = sema_storage_size(parameter);
+                    if (size == 0) {
+                        fprintf(out, "\t%%pcopy%" PRIu32 " =l copy 0\n", p);
+                    } else {
+                        fprintf(out, "\t%%pcopy%" PRIu32 " =l alloc8 %" PRIu32 "\n", p, size);
+                        fprintf(out, "\tblit %%p%" PRIu32 ", %%pcopy%" PRIu32 ", %" PRIu32 "\n",
+                                p, p, size);
+                    }
+                    if (addressed && addressed[p] != TYPE_INVALID) {
+                        fprintf(out, "\tstorel %%pcopy%" PRIu32 ", %%local%" PRIu32 "\n", p, p);
+                    } else {
+                        fprintf(out, "\t%%s%" PRIu32 " =l copy %%pcopy%" PRIu32 "\n", p, p);
+                    }
+                    continue;
+                }
                 if (addressed && addressed[p] != TYPE_INVALID) {
                     write_store(out, kind, "p", "plen", p, "local", p, "arg", p);
                     continue;

@@ -937,8 +937,6 @@ static void register_signature(Checker *checker, uint32_t index)
             fail(checker, annotation, "external parameters must be scalar");
         } else if (type.kind == TYPE_ARRAY) {
             fail(checker, annotation, "pass fixed arrays through a slice parameter");
-        } else if (type.kind == TYPE_STRUCT) {
-            fail(checker, annotation, "pass structs through a slice parameter");
         }
         sema_function_node(sema, function, &instance, param)->type = type;
     }

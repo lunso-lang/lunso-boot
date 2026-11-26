@@ -131,4 +131,50 @@ lunso_sys_unlink:
     ret
 .size lunso_sys_unlink, .-lunso_sys_unlink
 
+.globl lunso_sys_clock_gettime
+.type lunso_sys_clock_gettime, @function
+lunso_sys_clock_gettime:
+    mov %rsi, %r8          # save out_sec
+    mov %rdx, %r9          # save out_nsec
+    sub $16, %rsp          # struct timespec { i64 tv_sec; i64 tv_nsec; }
+    mov %rsp, %rsi
+    mov $228, %eax         # clock_gettime
+    syscall
+    test %rax, %rax
+    js .Lclock_done
+    test %r8, %r8
+    jz .Lclock_nsec
+    mov (%rsp), %rcx
+    mov %rcx, (%r8)
+.Lclock_nsec:
+    test %r9, %r9
+    jz .Lclock_done
+    mov 8(%rsp), %rcx
+    mov %rcx, (%r9)
+.Lclock_done:
+    add $16, %rsp
+    ret
+.size lunso_sys_clock_gettime, .-lunso_sys_clock_gettime
+
+.globl lunso_sys_nanosleep
+.type lunso_sys_nanosleep, @function
+lunso_sys_nanosleep:
+    push %rsi              # tv_nsec
+    push %rdi              # tv_sec
+    mov %rsp, %rdi         # req
+    xor %esi, %esi         # rem = NULL
+    mov $35, %eax          # nanosleep
+    syscall
+    add $16, %rsp
+    ret
+.size lunso_sys_nanosleep, .-lunso_sys_nanosleep
+
+.globl lunso_sys_getrandom
+.type lunso_sys_getrandom, @function
+lunso_sys_getrandom:
+    mov $318, %eax         # getrandom
+    syscall
+    ret
+.size lunso_sys_getrandom, .-lunso_sys_getrandom
+
 .section .note.GNU-stack,"",@progbits

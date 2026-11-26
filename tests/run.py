@@ -82,6 +82,15 @@ class TestPassPrograms(unittest.TestCase):
     def test_modules(self) -> None:
         self._run_pass_file(TESTS_DIR / "modules" / "main.lunso")
 
+    def test_generic_modules(self) -> None:
+        path = TESTS_DIR / "generics" / "main.lunso"
+        self._run_pass_file(path)
+        qbe = run_cmd([LUNSO, "--emit-qbe", path])
+        self.assertEqual(qbe.returncode, 0, qbe.stderr)
+        definitions = [line for line in qbe.stdout.splitlines() if line.startswith("function ")]
+        self.assertEqual(sum(".swap(" in line for line in definitions), 2)
+        self.assertFalse(any(".unused(" in line for line in definitions))
+
     def test_std_files(self) -> None:
         for lunso_file in sorted((TESTS_DIR / "std").glob("*.lunso")):
             with self.subTest(test=lunso_file.relative_to(ROOT)):

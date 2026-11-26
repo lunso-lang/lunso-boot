@@ -24,11 +24,9 @@ typedef struct {
     SemaError error;
     uint32_t *function_map;
     size_t function_capacity;
-    uint32_t *struct_sizes;
-    uint32_t *struct_alignments;
-    uint8_t *struct_state;
-    SemaType *const_types;
-    uint8_t *const_state;
+    uint32_t function_instance_capacity;
+    uint32_t record_capacity;
+    uint32_t constant_capacity;
     uint32_t pointee_capacity;
     uint32_t element_capacity;
     uint32_t match_value_capacity;
@@ -39,6 +37,12 @@ typedef struct {
     uint32_t next_slot;
     SemaType result;
     uint32_t module;
+    AstNodeRange type_parameters;
+    const SemaType *type_arguments;
+    SemaNode *instance_nodes;
+    AstNodeRange instance_range;
+    AstNodeId instantiated_at;
+    unsigned instantiation_depth;
     unsigned depth;
     LoopInfo loops[256];
     uint32_t loop_depth;
@@ -50,10 +54,20 @@ typedef struct {
 } Scope;
 
 enum { MAX_ANALYSIS_DEPTH = 256 };
+enum { MAX_INSTANTIATION_DEPTH = 64 };
 
 static const SemaType no_type = {.kind = TYPE_INVALID};
 static const SemaType bool_type = {.kind = TYPE_BOOL};
 static const SemaType void_type = {.kind = TYPE_VOID};
+
+static SemaNode *checked_node(const Checker *checker, AstNodeId id)
+{
+    if (checker->instance_nodes && id >= checker->instance_range.first &&
+        id - checker->instance_range.first < checker->instance_range.count) {
+        return &checker->instance_nodes[id - checker->instance_range.first];
+    }
+    return &checker->sema->nodes[id];
+}
 
 const char *sema_type_name(TypeKind type)
 {
@@ -107,7 +121,11 @@ static bool failed(const Checker *checker)
 static void fail_at(Checker *checker, uint32_t offset, const char *message)
 {
     if (!failed(checker)) {
-        checker->error = (SemaError){offset, message};
+        checker->error = (SemaError){.offset = offset, .message = message};
+        if (checker->instantiated_at) {
+            checker->error.has_instantiation = true;
+            checker->error.instantiation_offset = checker->ast->positions[checker->instantiated_at];
+        }
     }
 }
 
@@ -362,10 +380,195 @@ static uint32_t find_enum(const Ast *ast, uint32_t module, AstSpan name)
 static SemaType enum_type(const Checker *checker, uint32_t index)
 {
     AstNodeId backing = checker->ast->enums[index].backing;
-    return (SemaType){.kind = checker->sema->nodes[backing].type.kind, .record = index + 1};
+    return (SemaType){.kind = checked_node(checker, backing)->type.kind, .record = index + 1};
 }
 
 static SemaType resolve_type(Checker *checker, AstNodeId id);
+static SemaType resolve_type_mode(Checker *checker, AstNodeId id, bool indirect);
+static void layout_struct(Checker *checker, uint32_t index);
+
+typedef struct {
+    AstNodeRange parameters;
+    const SemaType *arguments;
+    uint32_t module;
+    size_t local_count;
+    AstNodeId instantiated_at;
+    unsigned depth;
+} TypeScope;
+
+static TypeScope enter_type_scope(Checker *checker, uint32_t module, AstNodeRange parameters,
+                                  const SemaType *arguments, AstNodeId use, unsigned depth)
+{
+    TypeScope saved = {checker->type_parameters, checker->type_arguments, checker->module,
+                       checker->local_count, checker->instantiated_at, checker->instantiation_depth};
+    checker->type_parameters = parameters;
+    checker->type_arguments = arguments;
+    checker->module = module;
+    checker->local_count = 0;
+    checker->instantiated_at = use;
+    checker->instantiation_depth = depth;
+    return saved;
+}
+
+static void leave_type_scope(Checker *checker, TypeScope saved)
+{
+    checker->type_parameters = saved.parameters;
+    checker->type_arguments = saved.arguments;
+    checker->module = saved.module;
+    checker->local_count = saved.local_count;
+    checker->instantiated_at = saved.instantiated_at;
+    checker->instantiation_depth = saved.depth;
+}
+
+static void *reserve_instances(void *items, uint32_t *capacity, uint32_t needed, size_t size)
+{
+    if (needed <= *capacity) {
+        return items;
+    }
+    uint64_t grown = (uint64_t)*capacity * 2 + 8;
+    if (grown < needed || grown > UINT32_MAX) {
+        grown = needed;
+    }
+    if (grown > SIZE_MAX / size) {
+        return NULL;
+    }
+    void *result = realloc(items, (size_t)grown * size);
+    if (result) {
+        *capacity = (uint32_t)grown;
+    }
+    return result;
+}
+
+static bool validate_type_parameters(Checker *checker, AstNodeRange range)
+{
+    const Ast *ast = checker->ast;
+    for (uint32_t i = 0; i < range.count; i++) {
+        AstNodeId id = ast->children[range.first + i];
+        AstSpan name = node_span(ast, id);
+        if (scalar_type(ast, name) != TYPE_INVALID || boolean_name(ast, name)) {
+            fail(checker, id, "reserved type parameter name");
+            return false;
+        }
+        for (uint32_t j = 0; j < i; j++) {
+            if (same_name(ast, name, node_span(ast, ast->children[range.first + j]))) {
+                fail(checker, id, "duplicate type parameter name");
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool same_arguments(const SemaType *left, const SemaType *right, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++) {
+        if (!same_type(left[i], right[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static SemaType *resolve_arguments(Checker *checker, AstNodeId id, uint32_t count)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[id];
+    if (node.b - 1 != count) {
+        fail(checker, id, "wrong number of type arguments");
+        return NULL;
+    }
+    SemaType *arguments = calloc(count, sizeof(*arguments));
+    if (!arguments) {
+        fail(checker, id, "could not allocate type arguments");
+        return NULL;
+    }
+    for (uint32_t i = 0; i < count && !failed(checker); i++) {
+        arguments[i] = resolve_type_mode(checker, ast->children[node.a + 1 + i], true);
+    }
+    if (failed(checker)) {
+        free(arguments);
+        return NULL;
+    }
+    return arguments;
+}
+
+static SemaType record_type(const Checker *checker, uint32_t index)
+{
+    return (SemaType){.kind = TYPE_STRUCT, .record = index,
+                      .record_size = checker->sema->records[index].size};
+}
+
+static SemaType complete_type(Checker *checker, SemaType type)
+{
+    if (!failed(checker) && type.kind == TYPE_STRUCT) {
+        layout_struct(checker, type.record);
+        return record_type(checker, type.record);
+    }
+    return type;
+}
+
+static uint32_t struct_declaration(const Checker *checker, AstNodeId id)
+{
+    const Ast *ast = checker->ast;
+    const AstQualified *qualified = ast_qualified(ast, id);
+    if (qualified && qualified->kind == BIND_STRUCT && !qualified->inaccessible) {
+        return qualified->index;
+    }
+    if (ast->kinds[id] == AST_TYPE_NAME || ast->kinds[id] == AST_IDENTIFIER) {
+        AstSpan name = node_span(ast, id);
+        const AstBinding *binding = ast_imported(ast, checker->module, name);
+        return binding && binding->kind == BIND_STRUCT ? binding->index
+                                                       : find_struct(ast, checker->module, name);
+    }
+    return UINT32_MAX;
+}
+
+static SemaType specialize_record(Checker *checker, AstNodeId id, bool indirect)
+{
+    const Ast *ast = checker->ast;
+    Sema *sema = checker->sema;
+    AstNodeId base = ast->children[ast->data[id].a];
+    uint32_t declaration = struct_declaration(checker, id);
+    if (declaration == UINT32_MAX) {
+        declaration = struct_declaration(checker, base);
+    }
+    if (declaration == UINT32_MAX) {
+        return fail(checker, id, "expected a generic struct");
+    }
+    uint32_t count = ast->structs[declaration].type_parameters.count;
+    if (!count) {
+        return fail(checker, id, "struct does not take type arguments");
+    }
+    SemaType *arguments = resolve_arguments(checker, id, count);
+    if (!arguments) {
+        return no_type;
+    }
+    for (uint32_t i = ast->struct_count; i < sema->record_count; i++) {
+        if (sema->records[i].declaration == declaration &&
+            same_arguments(sema->records[i].arguments, arguments, count)) {
+            free(arguments);
+            return indirect ? record_type(checker, i) : complete_type(checker, record_type(checker, i));
+        }
+    }
+    if (checker->instantiation_depth >= MAX_INSTANTIATION_DEPTH) {
+        free(arguments);
+        return fail(checker, id, "generic instantiation nesting limit exceeded");
+    }
+    uint32_t index = sema->record_count;
+    SemaRecord *records = index == UINT32_MAX ? NULL :
+                          reserve_instances(sema->records, &checker->record_capacity,
+                                            index + 1, sizeof(*records));
+    if (!records) {
+        free(arguments);
+        return fail(checker, id, "could not allocate generic struct instance");
+    }
+    sema->records = records;
+    sema->record_count++;
+    records[index] = (SemaRecord){.declaration = declaration, .arguments = arguments,
+                                  .instantiated_at = id,
+                                  .instantiation_depth = checker->instantiation_depth + 1};
+    return indirect ? record_type(checker, index) : complete_type(checker, record_type(checker, index));
+}
 
 static uint64_t align_bytes(uint64_t size, uint32_t alignment)
 {
@@ -375,6 +578,7 @@ static uint64_t align_bytes(uint64_t size, uint32_t alignment)
 enum { STRUCT_UNVISITED = 0, STRUCT_VISITING = 1, STRUCT_DONE = 2 };
 
 static const Local *find_local(const Checker *checker, AstSpan name, size_t first);
+static void check_const_at(Checker *checker, uint32_t declaration, uint32_t index);
 static void check_const(Checker *checker, uint32_t index);
 static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
                            uint64_t *out_bits, AstNodeId *out_string);
@@ -407,10 +611,10 @@ static bool resolve_array_length(Checker *checker, AstNodeId count_node,
                   ? binding->index
                   : find_const(checker->ast, checker->module, name);
         }
-        if (idx != UINT32_MAX && checker->const_state[idx] == 2 &&
-            is_integer(checker->const_types[idx].kind) && !is_enum(checker->const_types[idx])) {
-            uint64_t val = checker->sema->const_values[idx];
-            if (is_signed(checker->const_types[idx].kind) && (int64_t)val < 0) {
+        if (idx != UINT32_MAX && checker->sema->constants[idx].state == 2 &&
+            is_integer(checker->sema->constants[idx].type.kind) && !is_enum(checker->sema->constants[idx].type)) {
+            uint64_t val = checker->sema->constants[idx].bits;
+            if (is_signed(checker->sema->constants[idx].type.kind) && (int64_t)val < 0) {
                 fail(checker, count_node, "array length cannot be negative");
                 return false;
             }
@@ -433,178 +637,158 @@ static bool resolve_array_length(Checker *checker, AstNodeId count_node,
     return true;
 }
 
-static void layout_struct(Checker *checker, uint32_t index)
+static uint32_t type_alignment(const Checker *checker, SemaType type)
 {
-    if (checker->struct_state[index] == STRUCT_DONE) {
-        return;
+    while (type.kind == TYPE_ARRAY) {
+        type = element_type(checker, type);
     }
+    if (type.kind == TYPE_STRUCT) {
+        return checker->sema->records[type.record].alignment;
+    }
+    if (type.kind == TYPE_SLICE) {
+        return sema_scalar_size(TYPE_POINTER);
+    }
+    return sema_scalar_size(type.kind);
+}
+
+static uint32_t field_indirect_element_size(const Ast *ast, AstNodeId annotation)
+{
+    while (ast->kinds[annotation] == AST_ARRAY_TYPE && ast->data[annotation].b) {
+        annotation = ast->data[annotation].a;
+    }
+    uint32_t pointer_size = sema_scalar_size(TYPE_POINTER);
+    if (ast->kinds[annotation] == AST_POINTER_TYPE) {
+        return pointer_size;
+    }
+    if (ast->kinds[annotation] == AST_ARRAY_TYPE) {
+        return 2 * pointer_size;
+    }
+    return 0;
+}
+
+static uint32_t size_indirect_field(Checker *checker, AstNodeId annotation, uint32_t element_size)
+{
+    const Ast *ast = checker->ast;
+    AstNodeData node = ast->data[annotation];
+    if (ast->kinds[annotation] != AST_ARRAY_TYPE || !node.b) {
+        return element_size;
+    }
+    uint32_t size = size_indirect_field(checker, node.a, element_size);
+    uint32_t length;
+    return !failed(checker) && resolve_array_length(checker, node.b, size, &length)
+           ? size * length : 0;
+}
+
+static void validate_struct_declaration(Checker *checker, uint32_t index)
+{
     const Ast *ast = checker->ast;
     AstStruct record = ast->structs[index];
-    if (checker->struct_state[index] == STRUCT_VISITING) {
-        fail_at(checker, record.name.offset, "recursive struct definition");
-        return;
-    }
-    checker->struct_state[index] = STRUCT_VISITING;
-
-    uint32_t saved_module = checker->module;
-    checker->module = record.module;
     if (scalar_type(ast, record.name) != TYPE_INVALID ||
         find_struct(ast, record.module, record.name) != index) {
         fail_at(checker, record.name.offset, "duplicate or reserved struct name");
-        checker->module = saved_module;
         return;
     }
     if (!record.fields.count) {
         fail_at(checker, record.name.offset, "struct must have at least one field");
-        checker->module = saved_module;
         return;
     }
+    validate_type_parameters(checker, record.type_parameters);
+    const AstNodeId *fields = ast->children + record.fields.first;
+    for (uint32_t i = 0; i < record.fields.count && !failed(checker); i++) {
+        AstSpan name = node_span(ast, fields[i]);
+        for (uint32_t j = 0; j < i; j++) {
+            if (same_name(ast, name, node_span(ast, fields[j]))) {
+                fail(checker, fields[i], "duplicate field name");
+                return;
+            }
+        }
+    }
+}
+
+static void layout_struct(Checker *checker, uint32_t index)
+{
+    Sema *sema = checker->sema;
+    SemaRecord instance = sema->records[index];
+    if (instance.state == STRUCT_DONE) {
+        return;
+    }
+    const Ast *ast = checker->ast;
+    AstStruct record = ast->structs[instance.declaration];
+    if (instance.state == STRUCT_VISITING) {
+        fail_at(checker, record.name.offset, "recursive struct definition");
+        return;
+    }
+
+    TypeScope saved = enter_type_scope(checker, record.module, record.type_parameters,
+                                       instance.arguments,
+                                       instance.arguments ? instance.instantiated_at : checker->instantiated_at,
+                                       instance.arguments ? instance.instantiation_depth : checker->instantiation_depth);
+    if (instance.arguments) {
+        instance.fields = calloc(record.fields.count, sizeof(*instance.fields));
+        if (!instance.fields) {
+            fail_at(checker, record.name.offset, "could not allocate generic struct fields");
+            leave_type_scope(checker, saved);
+            return;
+        }
+        sema->records[index].fields = instance.fields;
+    }
+    sema->records[index].state = STRUCT_VISITING;
 
     const AstNodeId *fields = ast->children + record.fields.first;
     uint64_t size = 0;
     uint32_t alignment = 1;
-    for (uint32_t i = 0; i < record.fields.count; i++) {
+    for (uint32_t i = 0; i < record.fields.count && !failed(checker); i++) {
         AstNodeId field = fields[i];
-        AstSpan name = node_span(ast, field);
-        for (uint32_t j = 0; j < i; j++) {
-            if (same_name(ast, name, node_span(ast, fields[j]))) {
-                fail(checker, field, "duplicate field name");
-                checker->module = saved_module;
-                return;
-            }
-        }
         AstNodeId annotation = ast->data[field].b;
-        AstKind annotation_kind = ast->kinds[annotation];
-        if (annotation_kind != AST_TYPE_NAME && annotation_kind != AST_POINTER_TYPE &&
-            annotation_kind != AST_QUALIFIED_TYPE && annotation_kind != AST_ARRAY_TYPE) {
-            fail(checker, annotation, "struct fields must be scalar, struct, or fixed array");
-            checker->module = saved_module;
-            return;
-        }
-        SemaType type = {.kind = TYPE_INVALID};
-        uint32_t width = 0;
-        uint32_t field_align = 1;
-        if (annotation_kind == AST_POINTER_TYPE) {
-            type = (SemaType){.kind = TYPE_POINTER};
-            width = sema_scalar_size(TYPE_POINTER);
-            field_align = width;
-        } else if (annotation_kind == AST_ARRAY_TYPE) {
-            AstNodeId leaf = annotation;
-            while (ast->kinds[leaf] == AST_ARRAY_TYPE && ast->data[leaf].b != AST_NODE_NONE) {
-                leaf = ast->data[leaf].a;
-            }
-            bool deferred_pointer = ast->kinds[leaf] == AST_POINTER_TYPE ||
-                                    (ast->kinds[leaf] == AST_ARRAY_TYPE &&
-                                     ast->kinds[ast->data[leaf].a] == AST_POINTER_TYPE);
-            if (!deferred_pointer) {
-                if (ast->kinds[leaf] == AST_TYPE_NAME || ast->kinds[leaf] == AST_QUALIFIED_TYPE) {
-                    SemaType leaf_type = resolve_type(checker, leaf);
-                    if (failed(checker)) {
-                        checker->module = saved_module;
-                        return;
-                    }
-                    if (leaf_type.kind == TYPE_STRUCT) {
-                        layout_struct(checker, leaf_type.record);
-                        if (failed(checker)) {
-                            checker->module = saved_module;
-                            return;
-                        }
-                    }
-                }
-                type = resolve_type(checker, annotation);
-                if (type.kind == TYPE_INVALID || failed(checker)) {
-                    checker->module = saved_module;
-                    return;
-                }
-                width = sema_type_size(type);
-                if (ast->kinds[leaf] == AST_ARRAY_TYPE) {
-                    field_align = sema_scalar_size(TYPE_POINTER);
-                } else {
-                    SemaType leaf_type = resolve_type(checker, leaf);
-                    field_align = leaf_type.kind == TYPE_STRUCT
-                                  ? checker->struct_alignments[leaf_type.record]
-                                  : sema_scalar_size(leaf_type.kind);
-                }
-            } else {
-                uint64_t total_count = 1;
-                AstNodeId cur = annotation;
-                while (ast->kinds[cur] == AST_ARRAY_TYPE && ast->data[cur].b != AST_NODE_NONE) {
-                    uint32_t len = 0;
-                    uint32_t ptr_size = sema_scalar_size(TYPE_POINTER);
-                    if (!resolve_array_length(checker, ast->data[cur].b, ptr_size, &len)) {
-                        checker->module = saved_module;
-                        return;
-                    }
-                    if (total_count > (INT32_MAX - 7u) / (len ? len : 1)) {
-                        fail(checker, cur, "array is too large for local storage");
-                        checker->module = saved_module;
-                        return;
-                    }
-                    total_count *= len;
-                    cur = ast->data[cur].a;
-                }
-                uint32_t leaf_size = ast->kinds[cur] == AST_ARRAY_TYPE
-                                     ? 2 * sema_scalar_size(TYPE_POINTER)
-                                     : sema_scalar_size(TYPE_POINTER);
-                if (total_count > (INT32_MAX - 7u) / leaf_size) {
-                    fail(checker, annotation, "array is too large for local storage");
-                    checker->module = saved_module;
-                    return;
-                }
-                type = (SemaType){.kind = ast->data[annotation].b ? TYPE_ARRAY : TYPE_SLICE};
-                width = (uint32_t)(total_count * leaf_size);
-                field_align = sema_scalar_size(TYPE_POINTER);
-            }
+        // Resolve pointer and slice targets only after the enclosing layout is known.
+        uint32_t indirect = field_indirect_element_size(ast, annotation);
+        SemaType type = no_type;
+        uint32_t width;
+        uint32_t align;
+        if (indirect) {
+            width = size_indirect_field(checker, annotation, indirect);
+            align = sema_scalar_size(TYPE_POINTER);
         } else {
-            type = resolve_type(checker, annotation);
-            if (type.kind == TYPE_INVALID || failed(checker)) {
-                checker->module = saved_module;
-                return;
-            }
-            if (type.kind == TYPE_STRUCT) {
-                layout_struct(checker, type.record);
-                if (failed(checker)) {
-                    checker->module = saved_module;
-                    return;
-                }
-                type.record_size = checker->struct_sizes[type.record];
-                width = type.record_size;
-                field_align = checker->struct_alignments[type.record];
-            } else {
-                width = sema_scalar_size(type.kind);
-                if (!width) {
-                    fail(checker, annotation, "struct fields must be scalar, struct, or fixed array");
-                    checker->module = saved_module;
-                    return;
-                }
-                field_align = width;
-            }
+            type = complete_type(checker, resolve_type(checker, annotation));
+            width = sema_type_size(type);
+            align = type_alignment(checker, type);
         }
-        size = align_bytes(size, field_align);
+        if (failed(checker)) {
+            break;
+        }
+        if (!align) {
+            fail(checker, annotation, "invalid struct field type");
+            break;
+        }
+        size = align_bytes(size, align);
         if (size + width > INT32_MAX - 7u) {
-            fail(checker, field, "struct is too large for local storage");
-            checker->module = saved_module;
-            return;
+            fail(checker, annotation, "struct is too large for local storage");
+            break;
         }
-        checker->sema->nodes[field].type = type;
-        checker->sema->nodes[field].binding = (uint32_t)size;
+        SemaNode *info = instance.fields ? &instance.fields[i] : &sema->nodes[field];
+        *info = (SemaNode){.type = type, .binding = (uint32_t)size};
         size += width;
-        if (field_align > alignment) {
-            alignment = field_align;
+        if (align > alignment) {
+            alignment = align;
         }
     }
-    checker->struct_alignments[index] = alignment;
-    checker->struct_sizes[index] = (uint32_t)align_bytes(size, alignment);
-    checker->struct_state[index] = STRUCT_DONE;
-    checker->module = saved_module;
+    if (!failed(checker)) {
+        sema->records[index].alignment = alignment;
+        sema->records[index].size = (uint32_t)align_bytes(size, alignment);
+        sema->records[index].state = STRUCT_DONE;
+    }
+    leave_type_scope(checker, saved);
 }
 
-static SemaType resolve_type(Checker *checker, AstNodeId id)
+static SemaType resolve_type_mode(Checker *checker, AstNodeId id, bool indirect)
 {
     if (id == AST_NODE_NONE) {
         return void_type;
     }
     AstKind ast_kind = checker->ast->kinds[id];
+    if (ast_kind == AST_GENERIC_TYPE) {
+        return specialize_record(checker, id, indirect);
+    }
     if (ast_kind == AST_QUALIFIED_TYPE) {
         const AstQualified *qualified = ast_qualified(checker->ast, id);
         if (qualified && qualified->kind == BIND_ENUM) {
@@ -613,16 +797,18 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         if (!qualified || qualified->kind != BIND_STRUCT) {
             return fail(checker, id, "unknown qualified type");
         }
-        return (SemaType){.kind = TYPE_STRUCT, .record = qualified->index,
-                          .record_size = checker->struct_sizes[qualified->index]};
+        if (checker->ast->structs[qualified->index].type_parameters.count) {
+            return fail(checker, id, "generic struct requires type arguments");
+        }
+        return record_type(checker, qualified->index);
     }
     if (ast_kind == AST_POINTER_TYPE) {
-        SemaType pointee = resolve_type(checker, checker->ast->data[id].a);
+        SemaType pointee = resolve_type_mode(checker, checker->ast->data[id].a, true);
         return pointer_to(checker, id, pointee, checker->ast->data[id].b != 0);
     }
     if (ast_kind == AST_ARRAY_TYPE) {
         AstNodeData data = checker->ast->data[id];
-        SemaType element = resolve_type(checker, data.a);
+        SemaType element = complete_type(checker, resolve_type(checker, data.a));
         if (failed(checker)) {
             return no_type;
         }
@@ -642,10 +828,19 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
         return make_collection(checker, id, TYPE_ARRAY, length, element);
     }
     AstSpan name = node_span(checker->ast, id);
+    for (uint32_t i = 0; i < checker->type_parameters.count; i++) {
+        AstNodeId formal = checker->ast->children[checker->type_parameters.first + i];
+        if (same_name(checker->ast, name, node_span(checker->ast, formal))) {
+            SemaType type = checker->type_arguments[i];
+            return indirect ? type : complete_type(checker, type);
+        }
+    }
     const AstBinding *import = ast_imported(checker->ast, checker->module, name);
     if (import && import->kind == BIND_STRUCT) {
-        return (SemaType){.kind = TYPE_STRUCT, .record = import->index,
-                          .record_size = checker->struct_sizes[import->index]};
+        if (checker->ast->structs[import->index].type_parameters.count) {
+            return fail(checker, id, "generic struct requires type arguments");
+        }
+        return record_type(checker, import->index);
     }
     if (import && import->kind == BIND_ENUM) {
         return enum_type(checker, import->index);
@@ -656,8 +851,10 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     }
     uint32_t record = find_struct(checker->ast, checker->module, name);
     if (record != UINT32_MAX) {
-        return (SemaType){.kind = TYPE_STRUCT, .record = record,
-                          .record_size = checker->struct_sizes[record]};
+        if (checker->ast->structs[record].type_parameters.count) {
+            return fail(checker, id, "generic struct requires type arguments");
+        }
+        return record_type(checker, record);
     }
     uint32_t enumeration = find_enum(checker->ast, checker->module, name);
     if (enumeration != UINT32_MAX) {
@@ -666,21 +863,37 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
     return fail(checker, id, "unknown type");
 }
 
-static void resolve_pointer_fields(Checker *checker, AstStruct record)
+static SemaType resolve_type(Checker *checker, AstNodeId id)
 {
+    return resolve_type_mode(checker, id, false);
+}
+
+static void resolve_indirect_fields(Checker *checker, uint32_t index)
+{
+    Sema *sema = checker->sema;
+    SemaRecord instance = sema->records[index];
+    if (instance.indirect_fields_resolved || failed(checker)) {
+        return;
+    }
     const Ast *ast = checker->ast;
-    checker->module = record.module;
+    AstStruct record = ast->structs[instance.declaration];
+    TypeScope saved = enter_type_scope(checker, record.module, record.type_parameters,
+                                       instance.arguments, instance.instantiated_at,
+                                       instance.instantiation_depth);
     for (uint32_t i = 0; i < record.fields.count && !failed(checker); i++) {
         AstNodeId field = ast->children[record.fields.first + i];
         AstNodeId annotation = ast->data[field].b;
-        AstNodeId leaf = annotation;
-        while (ast->kinds[leaf] == AST_ARRAY_TYPE) {
-            leaf = ast->data[leaf].a;
-        }
-        if (ast->kinds[leaf] == AST_POINTER_TYPE) {
-            checker->sema->nodes[field].type = resolve_type(checker, annotation);
+        if (field_indirect_element_size(ast, annotation)) {
+            SemaType type = resolve_type(checker, annotation);
+            if (instance.fields) {
+                instance.fields[i].type = type;
+            } else {
+                sema->nodes[field].type = type;
+            }
         }
     }
+    sema->records[index].indirect_fields_resolved = true;
+    leave_type_scope(checker, saved);
 }
 
 static uint32_t *function_entry(const Checker *checker, AstSpan name)
@@ -700,6 +913,36 @@ static uint32_t *function_entry(const Checker *checker, AstSpan name)
         index = (index + 1) & mask;
     }
     return &checker->function_map[index];
+}
+
+static void register_signature(Checker *checker, uint32_t index)
+{
+    const Ast *ast = checker->ast;
+    Sema *sema = checker->sema;
+    SemaFunction instance = sema->functions[index];
+    const AstFunction *function = &ast->functions[instance.declaration];
+    TypeScope saved = enter_type_scope(checker, function->module, function->type_parameters,
+                                       instance.arguments, instance.instantiated_at,
+                                       instance.instantiation_depth);
+    sema->functions[index].result = resolve_type(checker, function->return_type);
+    TypeKind result = sema->functions[index].result.kind;
+    if (!function->body && (is_array_like(result) || result == TYPE_STRUCT)) {
+        fail(checker, function->return_type, "external results must be scalar");
+    }
+    for (uint32_t p = 0; p < function->parameters.count && !failed(checker); p++) {
+        AstNodeId param = ast->children[function->parameters.first + p];
+        AstNodeId annotation = ast->data[param].b;
+        SemaType type = resolve_type(checker, annotation);
+        if (!function->body && (is_array_like(type.kind) || type.kind == TYPE_STRUCT)) {
+            fail(checker, annotation, "external parameters must be scalar");
+        } else if (type.kind == TYPE_ARRAY) {
+            fail(checker, annotation, "pass fixed arrays through a slice parameter");
+        } else if (type.kind == TYPE_STRUCT) {
+            fail(checker, annotation, "pass structs through a slice parameter");
+        }
+        sema_function_node(sema, function, &instance, param)->type = type;
+    }
+    leave_type_scope(checker, saved);
 }
 
 static bool register_functions(Checker *checker)
@@ -732,23 +975,12 @@ static bool register_functions(Checker *checker)
             break;
         }
         *entry = i + 1;
-        checker->sema->functions[i].result = resolve_type(checker, function.return_type);
-        TypeKind result = checker->sema->functions[i].result.kind;
-        if (!function.body && (is_array_like(result) || result == TYPE_STRUCT)) {
-            fail(checker, function.return_type, "external results must be scalar");
-        }
-        for (uint32_t p = 0; p < function.parameters.count && !failed(checker); p++) {
-            AstNodeId param = ast->children[function.parameters.first + p];
-            AstNodeId annotation = ast->data[param].b;
-            SemaType type = resolve_type(checker, annotation);
-            if (!function.body && (is_array_like(type.kind) || type.kind == TYPE_STRUCT)) {
-                fail(checker, annotation, "external parameters must be scalar");
-            } else if (type.kind == TYPE_ARRAY) {
-                fail(checker, annotation, "pass fixed arrays through a slice parameter");
-            } else if (type.kind == TYPE_STRUCT) {
-                fail(checker, annotation, "pass structs through a slice parameter");
-            }
-            checker->sema->nodes[param].type = type;
+        if (!function.type_parameters.count) {
+            register_signature(checker, i);
+        } else if (!function.body) {
+            fail_at(checker, function.name.offset, "external functions cannot be generic");
+        } else {
+            validate_type_parameters(checker, function.type_parameters);
         }
     }
     return true;
@@ -803,8 +1035,8 @@ static void bind_local(Checker *checker, AstNodeId id, AstSpan name, SemaType ty
     }
     uint32_t slot = checker->next_slot++;
     checker->locals[checker->local_count++] = (Local){.name = name, .type = type, .slot = slot};
-    checker->sema->nodes[id].binding = slot;
-    checker->sema->nodes[id].type = type;
+    checked_node(checker, id)->binding = slot;
+    checked_node(checker, id)->type = type;
 }
 
 static SemaType check_expr(Checker *checker, AstNodeId id, SemaType expected);
@@ -824,7 +1056,7 @@ static SemaType check_value(Checker *checker, AstNodeId id, SemaType hint)
 
 static void promote(Checker *checker, AstNodeId id, TypeKind target)
 {
-    SemaNode *node = &checker->sema->nodes[id];
+    SemaNode *node = checked_node(checker, id);
     if (node->type.kind != target) {
         node->promotion = target;
     }
@@ -838,7 +1070,7 @@ static SemaType value(Checker *checker, AstNodeId id, SemaType expected)
     }
     if (type.kind == TYPE_ARRAY && expected.kind == TYPE_SLICE &&
         type.element_type == expected.element_type) {
-        checker->sema->nodes[id].borrow_array = true;
+        checked_node(checker, id)->borrow_array = true;
         return expected;
     }
     if (type.kind == TYPE_POINTER && expected.kind == TYPE_POINTER &&
@@ -895,7 +1127,7 @@ static void check_enum(Checker *checker, uint32_t index, uint32_t *next_value)
         fail_at(checker, enumeration.name.offset, "enum must have at least one member");
         return;
     }
-    checker->sema->nodes[enumeration.backing].type.kind = backing;
+    checked_node(checker, enumeration.backing)->type.kind = backing;
     const AstNodeId *cases = ast->children + enumeration.cases.first;
     uint64_t bits = 0;
     for (uint32_t i = 0; i < enumeration.cases.count; i++) {
@@ -924,7 +1156,7 @@ static void check_enum(Checker *checker, uint32_t index, uint32_t *next_value)
             bits++;
         }
         uint32_t slot = (*next_value)++;
-        checker->sema->nodes[member].binding = slot;
+        checked_node(checker, member)->binding = slot;
         checker->sema->enum_values[slot] = bits;
     }
 }
@@ -1000,17 +1232,17 @@ static SemaType check_identifier(Checker *checker, AstNodeId id)
 {
     AstSpan name = node_span(checker->ast, id);
     if (boolean_name(checker->ast, name)) {
-        checker->sema->nodes[id].is_boolean_literal = true;
-        checker->sema->nodes[id].binding = name_is(checker->ast, name, "true");
+        checked_node(checker, id)->is_boolean_literal = true;
+        checked_node(checker, id)->binding = name_is(checker->ast, name, "true");
         return bool_type;
     }
     const Local *local = find_local(checker, name, 0);
     if (local) {
         if (local->is_const) {
-            checker->sema->nodes[id].is_const = true;
-            checker->sema->nodes[id].binding = local->const_index;
+            checked_node(checker, id)->is_const = true;
+            checked_node(checker, id)->binding = local->const_index;
         } else {
-            checker->sema->nodes[id].binding = local->slot;
+            checked_node(checker, id)->binding = local->slot;
         }
         return local->type;
     }
@@ -1019,9 +1251,9 @@ static SemaType check_identifier(Checker *checker, AstNodeId id)
                            ? binding->index
                            : find_const(checker->ast, checker->module, name);
     if (const_index != UINT32_MAX) {
-        checker->sema->nodes[id].is_const = true;
-        checker->sema->nodes[id].binding = const_index;
-        return checker->const_types[const_index];
+        checked_node(checker, id)->is_const = true;
+        checked_node(checker, id)->binding = const_index;
+        return checker->sema->constants[const_index].type;
     }
     return fail(checker, id, "unknown variable");
 }
@@ -1040,7 +1272,7 @@ static SemaType check_collection_builtin(Checker *checker, AstNodeId id, SemaBui
         return fail(checker, id, length ? "len expects an array or slice"
                                         : "data expects an array or slice");
     }
-    checker->sema->nodes[id].builtin = builtin;
+    checked_node(checker, id)->builtin = builtin;
     return length ? (SemaType){.kind = TYPE_I64}
                   : pointer_to(checker, id, element_type(checker, operand), true);
 }
@@ -1053,9 +1285,55 @@ static SemaType check_size_of(Checker *checker, AstNodeId id)
         return fail(checker, id, "size_of expects one argument");
     }
     SemaType type = value(checker, ast->children[node.a + 1], no_type);
-    checker->sema->nodes[id].builtin = BUILTIN_SIZE_OF;
-    checker->sema->nodes[id].binding = sema_type_size(type);
+    checked_node(checker, id)->builtin = BUILTIN_SIZE_OF;
+    checked_node(checker, id)->binding = sema_type_size(type);
     return (SemaType){.kind = TYPE_U64};
+}
+
+static uint32_t specialize_function(Checker *checker, AstNodeId id, uint32_t declaration)
+{
+    Sema *sema = checker->sema;
+    const Ast *ast = checker->ast;
+    AstFunction function = ast->functions[declaration];
+    uint32_t count = function.type_parameters.count;
+    SemaType *arguments = resolve_arguments(checker, id, count);
+    if (!arguments) {
+        return UINT32_MAX;
+    }
+    for (uint32_t i = ast->function_count; i < sema->function_count; i++) {
+        if (sema->functions[i].declaration == declaration &&
+            same_arguments(sema->functions[i].arguments, arguments, count)) {
+            free(arguments);
+            return i;
+        }
+    }
+    if (checker->instantiation_depth >= MAX_INSTANTIATION_DEPTH) {
+        free(arguments);
+        fail(checker, id, "generic instantiation nesting limit exceeded");
+        return UINT32_MAX;
+    }
+    uint32_t index = sema->function_count;
+    SemaFunction *functions = index == UINT32_MAX ? NULL :
+                              reserve_instances(sema->functions, &checker->function_instance_capacity,
+                                                index + 1, sizeof(*functions));
+    if (!functions) {
+        free(arguments);
+        fail(checker, id, "could not allocate generic function instance");
+        return UINT32_MAX;
+    }
+    sema->functions = functions;
+    SemaNode *nodes = calloc(function.nodes.count, sizeof(*nodes));
+    if (!nodes) {
+        free(arguments);
+        fail(checker, id, "could not allocate generic function annotations");
+        return UINT32_MAX;
+    }
+    sema->function_count++;
+    functions[index] = (SemaFunction){.declaration = declaration, .arguments = arguments,
+                                      .nodes = nodes, .instantiated_at = id,
+                                      .instantiation_depth = checker->instantiation_depth + 1};
+    register_signature(checker, index);
+    return index;
 }
 
 static SemaType check_call(Checker *checker, AstNodeId id)
@@ -1063,6 +1341,11 @@ static SemaType check_call(Checker *checker, AstNodeId id)
     const Ast *ast = checker->ast;
     AstNodeData node = ast->data[id];
     AstNodeId callee = ast->children[node.a];
+    AstNodeId application = AST_NODE_NONE;
+    if (ast->kinds[callee] == AST_GENERIC_CALLEE) {
+        application = callee;
+        callee = ast->children[ast->data[callee].a];
+    }
     AstNodeId root = callee;
     while (ast->kinds[root] == AST_MEMBER) {
         root = ast->data[root].a;
@@ -1090,29 +1373,43 @@ static SemaType check_call(Checker *checker, AstNodeId id)
             }
         }
     }
-    if (!entry && name_is(ast, name, "len")) {
+    if (!entry && !application && name_is(ast, name, "len")) {
         return check_collection_builtin(checker, id, BUILTIN_LEN);
     }
-    if (!entry && name_is(ast, name, "data")) {
+    if (!entry && !application && name_is(ast, name, "data")) {
         return check_collection_builtin(checker, id, BUILTIN_DATA);
     }
-    if (!entry && name_is(ast, name, "size_of")) {
+    if (!entry && !application && name_is(ast, name, "size_of")) {
         return check_size_of(checker, id);
     }
     if (!entry) {
         return fail(checker, callee, "unknown function");
     }
     uint32_t index = entry - 1;
-    AstNodeRange parameters = ast->functions[index].parameters;
+    const AstFunction *function = &ast->functions[index];
+    AstNodeRange parameters = function->parameters;
     if (node.b - 1 != parameters.count) {
         return fail(checker, id, "wrong number of function arguments");
+    }
+    if (function->type_parameters.count) {
+        if (!application) {
+            return fail(checker, id, "generic function requires explicit type arguments");
+        }
+        index = specialize_function(checker, application, index);
+        if (failed(checker)) {
+            return no_type;
+        }
+    } else if (application) {
+        return fail(checker, application, "function does not take type arguments");
     }
     for (uint32_t i = 0; i < parameters.count && !failed(checker); i++) {
         AstNodeId arg = ast->children[node.a + 1 + i];
         AstNodeId param = ast->children[parameters.first + i];
-        value(checker, arg, checker->sema->nodes[param].type);
+        SemaType type = sema_function_node(checker->sema, function,
+                                           &checker->sema->functions[index], param)->type;
+        value(checker, arg, type);
     }
-    checker->sema->nodes[id].binding = index;
+    checked_node(checker, id)->binding = index;
     return checker->sema->functions[index].result;
 }
 
@@ -1190,19 +1487,19 @@ typedef enum { NO_ADDRESS, READ_ONLY_ADDRESS, WRITABLE_ADDRESS } AddressAccess;
 static AddressAccess address_access(const Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
-    SemaNode info = checker->sema->nodes[id];
+    SemaNode info = *checked_node(checker, id);
     if (info.is_enum_case) {
         return NO_ADDRESS;
     }
     if (info.is_const) {
         return info.type.kind == TYPE_ARRAY &&
-               checker->sema->const_strings[info.binding] != AST_NODE_NONE
+               checker->sema->constants[info.binding].string != AST_NODE_NONE
                ? READ_ONLY_ADDRESS : NO_ADDRESS;
     }
     while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
         AstNodeId base = ast->data[id].a;
         if (ast->kinds[id] == AST_INDEX) {
-            SemaType type = checker->sema->nodes[base].type;
+            SemaType type = checked_node(checker, base)->type;
             if (type.kind == TYPE_POINTER) {
                 return type.read_only ? READ_ONLY_ADDRESS : WRITABLE_ADDRESS;
             }
@@ -1213,17 +1510,17 @@ static AddressAccess address_access(const Checker *checker, AstNodeId id)
         id = base;
     }
     if (ast->kinds[id] == AST_DEREFERENCE) {
-        SemaType pointer = checker->sema->nodes[ast->data[id].a].type;
+        SemaType pointer = checked_node(checker, ast->data[id].a)->type;
         return pointer.read_only ? READ_ONLY_ADDRESS : WRITABLE_ADDRESS;
     }
     if (ast->kinds[id] == AST_STRING) {
         return READ_ONLY_ADDRESS;
     }
-    if (checker->sema->nodes[id].is_const) {
-        return checker->sema->const_strings[checker->sema->nodes[id].binding] != AST_NODE_NONE
+    if (checked_node(checker, id)->is_const) {
+        return checker->sema->constants[checked_node(checker, id)->binding].string != AST_NODE_NONE
                ? READ_ONLY_ADDRESS : NO_ADDRESS;
     }
-    if (ast->kinds[id] == AST_IDENTIFIER && !checker->sema->nodes[id].is_boolean_literal) {
+    if (ast->kinds[id] == AST_IDENTIFIER && !checked_node(checker, id)->is_boolean_literal) {
         return WRITABLE_ADDRESS;
     }
     return NO_ADDRESS;
@@ -1254,7 +1551,8 @@ static SemaType check_binary(Checker *checker, AstNodeId id, SemaType expected)
         left = check_value(checker, node.a, assignment ? no_type : context);
         if (assignment && !failed(checker) && address_access(checker, node.a) != WRITABLE_ADDRESS) {
             if (target == AST_DEREFERENCE ||
-                (target == AST_INDEX && checker->sema->nodes[ast->data[node.a].a].type.kind == TYPE_POINTER)) {
+                (target == AST_INDEX &&
+                 checked_node(checker, ast->data[node.a].a)->type.kind == TYPE_POINTER)) {
                 return fail(checker, node.a, "cannot write through a read-only pointer");
             }
             return fail(checker, node.a, target == AST_INDEX
@@ -1327,7 +1625,7 @@ static SemaType check_unary(Checker *checker, AstNodeId id, SemaType expected)
     }
     if (kind == AST_NEGATE && ast->kinds[child] == AST_INTEGER) {
         SemaType type = integer_literal(checker, child, expected, true);
-        checker->sema->nodes[child].type = type;
+        checked_node(checker, child)->type = type;
         return type;
     }
     SemaType type = check_value(checker, child, is_numeric(expected.kind) ? expected : no_type);
@@ -1343,6 +1641,16 @@ static SemaType check_unary(Checker *checker, AstNodeId id, SemaType expected)
     return type;
 }
 
+static SemaNode record_field(const Checker *checker, uint32_t record, uint32_t field)
+{
+    SemaRecord info = checker->sema->records[record];
+    if (info.fields) {
+        return info.fields[field];
+    }
+    AstNodeRange range = checker->ast->structs[info.declaration].fields;
+    return checker->sema->nodes[checker->ast->children[range.first + field]];
+}
+
 static SemaType check_member(Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
@@ -1353,9 +1661,9 @@ static SemaType check_member(Checker *checker, AstNodeId id)
         if (qualified->inaccessible) {
             return fail(checker, id, "cannot access a private constant");
         }
-        checker->sema->nodes[id].is_const = true;
-        checker->sema->nodes[id].binding = qualified->index;
-        return checker->const_types[qualified->index];
+        checked_node(checker, id)->is_const = true;
+        checked_node(checker, id)->binding = qualified->index;
+        return checker->sema->constants[qualified->index].type;
     }
     AstNodeId root = node.a;
     if (qualified && qualified->kind == BIND_ENUM) {
@@ -1382,8 +1690,8 @@ static SemaType check_member(Checker *checker, AstNodeId id)
         for (uint32_t i = 0; i < cases.count; i++) {
             AstNodeId member = ast->children[cases.first + i];
             if (same_name(ast, name, node_span(ast, member))) {
-                checker->sema->nodes[id].binding = checker->sema->nodes[member].binding;
-                checker->sema->nodes[id].is_enum_case = true;
+                checked_node(checker, id)->binding = checked_node(checker, member)->binding;
+                checked_node(checker, id)->is_enum_case = true;
                 return enum_type(checker, enumeration);
             }
         }
@@ -1393,12 +1701,13 @@ static SemaType check_member(Checker *checker, AstNodeId id)
     if (base.kind != TYPE_STRUCT) {
         return fail(checker, id, "member access requires a struct value");
     }
-    AstNodeRange fields = ast->structs[base.record].fields;
+    resolve_indirect_fields(checker, base.record);
+    AstNodeRange fields = ast->structs[checker->sema->records[base.record].declaration].fields;
     for (uint32_t i = 0; i < fields.count; i++) {
         AstNodeId field = ast->children[fields.first + i];
         if (same_name(ast, name, node_span(ast, field))) {
-            SemaNode info = checker->sema->nodes[field];
-            checker->sema->nodes[id].binding = info.binding;
+            SemaNode info = record_field(checker, base.record, i);
+            checked_node(checker, id)->binding = info.binding;
             return info.type;
         }
     }
@@ -1443,44 +1752,38 @@ static SemaType check_cast(Checker *checker, AstNodeId id)
     return fail(checker, id, "unsupported cast between these types");
 }
 
-static uint32_t resolve_struct_expr(Checker *checker, AstNodeId base)
+static SemaType resolve_struct_expr(Checker *checker, AstNodeId base)
 {
     const Ast *ast = checker->ast;
     AstKind kind = ast->kinds[base];
-    if (kind == AST_IDENTIFIER) {
-        AstSpan name = node_span(ast, base);
-        const AstBinding *binding = ast_imported(ast, checker->module, name);
-        if (binding && binding->kind == BIND_STRUCT) {
-            return binding->index;
-        }
-        uint32_t record = find_struct(ast, checker->module, name);
-        if (record != UINT32_MAX) {
-            return record;
-        }
-    } else if (kind == AST_MEMBER) {
-        const AstQualified *qualified = ast_qualified(ast, base);
-        if (qualified && qualified->kind == BIND_STRUCT) {
-            if (qualified->inaccessible) {
-                fail(checker, base, "cannot access a private struct");
-                return UINT32_MAX;
-            }
-            return qualified->index;
-        }
+    if (kind == AST_GENERIC_TYPE) {
+        return specialize_record(checker, base, false);
     }
-    fail(checker, base, "expected a struct type");
-    return UINT32_MAX;
+    const AstQualified *qualified = ast_qualified(ast, base);
+    if (qualified && qualified->kind == BIND_STRUCT && qualified->inaccessible) {
+        return fail(checker, base, "cannot access a private struct");
+    }
+    uint32_t declaration = struct_declaration(checker, base);
+    if (declaration == UINT32_MAX) {
+        return fail(checker, base, "expected a struct type");
+    }
+    if (ast->structs[declaration].type_parameters.count) {
+        return fail(checker, base, "generic struct requires type arguments");
+    }
+    return record_type(checker, declaration);
 }
 
 static SemaType check_struct_literal(Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
     AstNodeData node = ast->data[id];
-    uint32_t record = resolve_struct_expr(checker, ast->children[node.a]);
-    if (record == UINT32_MAX) {
+    SemaType type = resolve_struct_expr(checker, ast->children[node.a]);
+    if (failed(checker)) {
         return no_type;
     }
 
-    AstNodeRange fields = ast->structs[record].fields;
+    resolve_indirect_fields(checker, type.record);
+    AstNodeRange fields = ast->structs[checker->sema->records[type.record].declaration].fields;
     for (uint32_t i = 1; i < node.b && !failed(checker); i++) {
         AstNodeId init = ast->children[node.a + i];
         AstSpan name = {ast->positions[init], ast->data[init].a};
@@ -1493,25 +1796,24 @@ static SemaType check_struct_literal(Checker *checker, AstNodeId id)
             }
         }
 
-        AstNodeId matched = AST_NODE_NONE;
+        uint32_t matched = UINT32_MAX;
         for (uint32_t f = 0; f < fields.count; f++) {
             AstNodeId field = ast->children[fields.first + f];
             if (same_name(ast, name, node_span(ast, field))) {
-                matched = field;
+                matched = f;
                 break;
             }
         }
-        if (!matched) {
+        if (matched == UINT32_MAX) {
             return fail(checker, init, "unknown struct field");
         }
-        SemaNode info = checker->sema->nodes[matched];
-        checker->sema->nodes[init].binding = info.binding;
-        checker->sema->nodes[init].type = info.type;
+        SemaNode info = record_field(checker, type.record, matched);
+        checked_node(checker, init)->binding = info.binding;
+        checked_node(checker, init)->type = info.type;
         value(checker, ast->data[init].b, info.type);
     }
 
-    return (SemaType){.kind = TYPE_STRUCT, .record = record,
-                      .record_size = checker->struct_sizes[record]};
+    return type;
 }
 
 static SemaType check_array_literal(Checker *checker, AstNodeId id, SemaType expected)
@@ -1582,7 +1884,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if ((!is_array_like(base.kind) && base.kind != TYPE_POINTER) || !is_plain_integer(index)) {
             return fail(checker, id, "indexing requires an array, slice, or pointer and an integer index");
         }
-        return base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee]
+        return base.kind == TYPE_POINTER ? complete_type(checker, checker->sema->pointees[base.pointee])
                                          : element_type(checker, base);
     }
     case AST_SLICE: {
@@ -1597,7 +1899,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (failed(checker)) {
             return no_type;
         }
-        SemaType element = base.kind == TYPE_POINTER ? checker->sema->pointees[base.pointee]
+        SemaType element = base.kind == TYPE_POINTER ? complete_type(checker, checker->sema->pointees[base.pointee])
                                                      : element_type(checker, base);
         return make_collection(checker, id, TYPE_SLICE, 0, element);
     }
@@ -1621,7 +1923,7 @@ static SemaType expression_type(Checker *checker, AstNodeId id, SemaType expecte
         if (operand.kind != TYPE_POINTER) {
             return fail(checker, id, "dereference requires a pointer");
         }
-        return checker->sema->pointees[operand.pointee];
+        return complete_type(checker, checker->sema->pointees[operand.pointee]);
     }
     case AST_POSITIVE:
     case AST_NEGATE:
@@ -1640,7 +1942,7 @@ static SemaType check_expr(Checker *checker, AstNodeId id, SemaType expected)
     }
     SemaType type = expression_type(checker, id, expected);
     checker->depth--;
-    checker->sema->nodes[id].type = type;
+    checked_node(checker, id)->type = type;
     return type;
 }
 
@@ -1663,7 +1965,7 @@ static bool check_block(Checker *checker, AstNodeId id)
         bool child_falls = check_statement(checker, checker->ast->children[data.a + i]);
         falls_through = falls_through && child_falls;
     }
-    checker->sema->nodes[id].falls_through = falls_through;
+    checked_node(checker, id)->falls_through = falls_through;
     return falls_through;
 }
 
@@ -1815,7 +2117,7 @@ static bool check_match(Checker *checker, AstNodeId id)
                 if (!add_match_value(checker, pat, bits, &idx)) {
                     return false;
                 }
-                checker->sema->nodes[pat].binding = idx;
+                checked_node(checker, pat)->binding = idx;
             }
         }
         bool arm_falls = check_statement(checker, body);
@@ -1827,7 +2129,7 @@ static bool check_match(Checker *checker, AstNodeId id)
             AstNodeRange cases = ast->enums[scrut.record - 1].cases;
             for (uint32_t c = 0; c < cases.count; c++) {
                 AstNodeId case_node = ast->children[cases.first + c];
-                uint64_t val = checker->sema->enum_values[checker->sema->nodes[case_node].binding];
+                uint64_t val = checker->sema->enum_values[checked_node(checker, case_node)->binding];
                 bool covered = false;
                 for (uint32_t k = pat_start; k < checker->sema->match_value_count; k++) {
                     if (checker->sema->match_values[k] == val) {
@@ -1897,7 +2199,7 @@ static bool statement_falls_through(Checker *checker, AstNodeId id)
     case AST_BREAK: {
         uint32_t target = resolve_loop_target(checker, id, true);
         if (!failed(checker)) {
-            checker->sema->nodes[id].binding = target;
+            checked_node(checker, id)->binding = target;
             checker->loops[target].broke = true;
         }
         return false;
@@ -1905,7 +2207,7 @@ static bool statement_falls_through(Checker *checker, AstNodeId id)
     case AST_CONTINUE: {
         uint32_t target = resolve_loop_target(checker, id, false);
         if (!failed(checker)) {
-            checker->sema->nodes[id].binding = target;
+            checked_node(checker, id)->binding = target;
         }
         return false;
     }
@@ -1916,7 +2218,21 @@ static bool statement_falls_through(Checker *checker, AstNodeId id)
             fail(checker, id, "duplicate variable name");
             return true;
         }
-        check_const(checker, idx);
+        if (checker->instance_nodes) {
+            Sema *sema = checker->sema;
+            idx = sema->constant_count;
+            SemaConstant *constants = idx == UINT32_MAX ? NULL :
+                                      reserve_instances(sema->constants, &checker->constant_capacity,
+                                                        idx + 1, sizeof(*constants));
+            if (!constants) {
+                fail(checker, id, "could not allocate instance constant");
+                return true;
+            }
+            sema->constants = constants;
+            constants[idx] = (SemaConstant){0};
+            sema->constant_count++;
+        }
+        check_const_at(checker, node.a, idx);
         if (!failed(checker)) {
             if (checker->local_count == checker->local_capacity) {
                 size_t cap = checker->local_capacity ? checker->local_capacity * 2 : 16;
@@ -1930,7 +2246,7 @@ static bool statement_falls_through(Checker *checker, AstNodeId id)
             }
             checker->locals[checker->local_count++] = (Local){
                 .name = constant.name,
-                .type = checker->const_types[idx],
+                .type = checker->sema->constants[idx].type,
                 .const_index = idx,
                 .is_const = true,
             };
@@ -1953,48 +2269,60 @@ static bool check_statement(Checker *checker, AstNodeId id)
     }
     bool falls = statement_falls_through(checker, id);
     checker->depth--;
-    checker->sema->nodes[id].falls_through = falls;
+    checked_node(checker, id)->falls_through = falls;
     return falls;
 }
 
 static void check_function(Checker *checker, uint32_t index)
 {
     const Ast *ast = checker->ast;
-    AstFunction function = ast->functions[index];
-    SemaFunction *info = &checker->sema->functions[index];
-    checker->module = function.module;
-    checker->result = info->result;
-    checker->local_count = 0;
+    SemaFunction instance = checker->sema->functions[index];
+    AstFunction function = ast->functions[instance.declaration];
+    if (!function.body || (function.type_parameters.count && !instance.arguments)) {
+        return;
+    }
+    TypeScope saved = enter_type_scope(checker, function.module, function.type_parameters,
+                                       instance.arguments, instance.instantiated_at,
+                                       instance.instantiation_depth);
+    checker->instance_nodes = instance.nodes;
+    checker->instance_range = function.nodes;
+    checker->result = instance.result;
     checker->scope_start = 0;
     checker->next_slot = 0;
     checker->loop_depth = 0;
     for (uint32_t i = 0; i < function.parameters.count && !failed(checker); i++) {
         AstNodeId param = ast->children[function.parameters.first + i];
-        bind_local(checker, param, node_span(ast, param), checker->sema->nodes[param].type);
+        bind_local(checker, param, node_span(ast, param), checked_node(checker, param)->type);
     }
-    if (function.body) {
-        bool falls = check_block(checker, function.body);
-        if (falls && info->result.kind != TYPE_VOID) {
-            fail_at(checker, function.name.offset, "function can finish without returning a value");
-        }
-        info->slot_count = checker->next_slot;
+    bool falls = check_block(checker, function.body);
+    if (falls && instance.result.kind != TYPE_VOID) {
+        fail_at(checker, function.name.offset, "function can finish without returning a value");
     }
+    checker->sema->functions[index].slot_count = checker->next_slot;
+    checker->instance_nodes = NULL;
+    leave_type_scope(checker, saved);
 }
 
 void sema_destroy(Sema *sema)
 {
+    for (uint32_t i = 0; i < sema->function_count; i++) {
+        free(sema->functions[i].nodes);
+        free(sema->functions[i].arguments);
+    }
+    for (uint32_t i = 0; i < sema->record_count; i++) {
+        free(sema->records[i].fields);
+        free(sema->records[i].arguments);
+    }
     free(sema->nodes);
     free(sema->functions);
+    free(sema->records);
+    free(sema->constants);
     free(sema->pointees);
     free(sema->elements);
     free(sema->enum_values);
-    free(sema->const_values);
-    free(sema->const_strings);
     free(sema->match_values);
     *sema = (Sema){0};
 }
-
-static void check_const(Checker *checker, uint32_t index);
 
 static uint64_t normalize_int_bits(TypeKind kind, uint64_t bits)
 {
@@ -2077,7 +2405,7 @@ static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
     case AST_STRING: {
         type = string_literal(checker, id);
         if (!failed(checker)) {
-            checker->sema->nodes[id].type = type;
+            checked_node(checker, id)->type = type;
             str_node = id;
         }
         break;
@@ -2108,9 +2436,9 @@ static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
         }
         check_const(checker, idx);
         if (!failed(checker)) {
-            type = checker->const_types[idx];
-            bits = checker->sema->const_values[idx];
-            str_node = checker->sema->const_strings[idx];
+            type = checker->sema->constants[idx].type;
+            bits = checker->sema->constants[idx].bits;
+            str_node = checker->sema->constants[idx].string;
         }
         break;
     }
@@ -2123,15 +2451,15 @@ static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
             }
             check_const(checker, qualified->index);
             if (!failed(checker)) {
-                type = checker->const_types[qualified->index];
-                bits = checker->sema->const_values[qualified->index];
-                str_node = checker->sema->const_strings[qualified->index];
+                type = checker->sema->constants[qualified->index].type;
+                bits = checker->sema->constants[qualified->index].bits;
+                str_node = checker->sema->constants[qualified->index].string;
             }
             break;
         }
         type = check_member(checker, id);
-        if (!failed(checker) && checker->sema->nodes[id].is_enum_case) {
-            bits = checker->sema->enum_values[checker->sema->nodes[id].binding];
+        if (!failed(checker) && checked_node(checker, id)->is_enum_case) {
+            bits = checker->sema->enum_values[checked_node(checker, id)->binding];
         } else if (!failed(checker)) {
             fail(checker, id, "constant expression required");
         }
@@ -2385,18 +2713,18 @@ static SemaType eval_const(Checker *checker, AstNodeId id, SemaType expected,
     return type;
 }
 
-static void check_const(Checker *checker, uint32_t index)
+static void check_const_at(Checker *checker, uint32_t declaration, uint32_t index)
 {
-    if (checker->const_state[index] == STRUCT_DONE) {
+    if (checker->sema->constants[index].state == STRUCT_DONE) {
         return;
     }
     const Ast *ast = checker->ast;
-    AstConst constant = ast->consts[index];
-    if (checker->const_state[index] == STRUCT_VISITING) {
+    AstConst constant = ast->consts[declaration];
+    if (checker->sema->constants[index].state == STRUCT_VISITING) {
         fail_at(checker, constant.name.offset, "cyclic constant definition");
         return;
     }
-    checker->const_state[index] = STRUCT_VISITING;
+    checker->sema->constants[index].state = STRUCT_VISITING;
 
     uint32_t saved_module = checker->module;
     checker->module = constant.module;
@@ -2452,11 +2780,16 @@ static void check_const(Checker *checker, uint32_t index)
         }
     }
 
-    checker->const_types[index] = actual;
-    checker->sema->const_values[index] = bits;
-    checker->sema->const_strings[index] = str_node;
-    checker->const_state[index] = STRUCT_DONE;
+    checker->sema->constants[index].type = actual;
+    checker->sema->constants[index].bits = bits;
+    checker->sema->constants[index].string = str_node;
+    checker->sema->constants[index].state = STRUCT_DONE;
     checker->module = saved_module;
+}
+
+static void check_const(Checker *checker, uint32_t index)
+{
+    check_const_at(checker, index, index);
 }
 
 bool sema_check(const Ast *ast, Sema *out, SemaError *error)
@@ -2470,11 +2803,21 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
     Checker checker = {.ast = ast, .sema = out};
     if (ast->function_count) {
         out->functions = calloc(ast->function_count, sizeof(*out->functions));
+        if (out->functions) {
+            out->function_count = checker.function_instance_capacity = ast->function_count;
+            for (uint32_t i = 0; i < ast->function_count; i++) {
+                out->functions[i].declaration = i;
+            }
+        }
     }
     if (ast->struct_count) {
-        checker.struct_sizes = calloc(ast->struct_count, sizeof(*checker.struct_sizes));
-        checker.struct_alignments = calloc(ast->struct_count, sizeof(*checker.struct_alignments));
-        checker.struct_state = calloc(ast->struct_count, sizeof(*checker.struct_state));
+        out->records = calloc(ast->struct_count, sizeof(*out->records));
+        if (out->records) {
+            out->record_count = checker.record_capacity = ast->struct_count;
+            for (uint32_t i = 0; i < ast->struct_count; i++) {
+                out->records[i].declaration = i;
+            }
+        }
     }
     size_t enum_value_count = 0;
     for (uint32_t i = 0; i < ast->enum_count; i++) {
@@ -2484,21 +2827,22 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
         out->enum_values = calloc(enum_value_count, sizeof(*out->enum_values));
     }
     if (ast->const_count) {
-        out->const_values = calloc(ast->const_count, sizeof(*out->const_values));
-        out->const_strings = calloc(ast->const_count, sizeof(*out->const_strings));
-        checker.const_types = calloc(ast->const_count, sizeof(*checker.const_types));
-        checker.const_state = calloc(ast->const_count, sizeof(*checker.const_state));
+        out->constants = calloc(ast->const_count, sizeof(*out->constants));
+        if (out->constants) {
+            out->constant_count = checker.constant_capacity = ast->const_count;
+        }
     }
     if (!out->nodes || (ast->function_count && !out->functions) ||
-        (ast->struct_count && (!checker.struct_sizes || !checker.struct_alignments || !checker.struct_state)) ||
-        (enum_value_count && !out->enum_values) ||
-        (ast->const_count && (!out->const_values || !out->const_strings ||
-                              !checker.const_types || !checker.const_state))) {
+        (ast->struct_count && !out->records) || (enum_value_count && !out->enum_values) ||
+        (ast->const_count && !out->constants)) {
         fail_at(&checker, 0, "could not allocate semantic analysis storage");
     }
     uint32_t next_value = 0;
     for (uint32_t i = 0; i < ast->enum_count && !failed(&checker); i++) {
         check_enum(&checker, i, &next_value);
+    }
+    for (uint32_t i = 0; i < ast->struct_count && !failed(&checker); i++) {
+        validate_struct_declaration(&checker, i);
     }
     for (uint32_t i = 0; i < ast->const_count && !failed(&checker); i++) {
         if (!ast->consts[i].local) {
@@ -2506,24 +2850,28 @@ bool sema_check(const Ast *ast, Sema *out, SemaError *error)
         }
     }
     for (uint32_t i = 0; i < ast->struct_count && !failed(&checker); i++) {
-        layout_struct(&checker, i);
+        if (!ast->structs[i].type_parameters.count) {
+            layout_struct(&checker, i);
+        }
     }
     for (uint32_t i = 0; i < ast->struct_count && !failed(&checker); i++) {
-        resolve_pointer_fields(&checker, ast->structs[i]);
+        if (!ast->structs[i].type_parameters.count) {
+            resolve_indirect_fields(&checker, i);
+        }
     }
     if (!failed(&checker) && !register_functions(&checker)) {
         fail_at(&checker, 0, "could not allocate semantic analysis storage");
     }
-    for (uint32_t i = 0; i < ast->function_count && !failed(&checker); i++) {
+    for (uint32_t i = 0; i < out->function_count && !failed(&checker); i++) {
+        // Checking a body can append more concrete functions to this queue.
         check_function(&checker, i);
+    }
+    for (uint32_t i = ast->struct_count; i < out->record_count && !failed(&checker); i++) {
+        layout_struct(&checker, i);
+        resolve_indirect_fields(&checker, i);
     }
     free(checker.locals);
     free(checker.function_map);
-    free(checker.struct_sizes);
-    free(checker.struct_alignments);
-    free(checker.struct_state);
-    free(checker.const_types);
-    free(checker.const_state);
     if (failed(&checker)) {
         *error = checker.error;
         sema_destroy(out);

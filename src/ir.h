@@ -41,12 +41,15 @@ typedef struct {
     uint32_t first_instruction, instruction_count;
     uint32_t slot_count;
     uint32_t module;
+    uint32_t specialization;
     bool external;
+    bool template_only;
 } IrFunction;
 
 typedef struct {
     AstSpan name;
     uint32_t module;
+    uint32_t specialization;
 } IrStructName;
 
 typedef struct {

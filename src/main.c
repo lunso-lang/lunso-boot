@@ -185,6 +185,9 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     SemaError error;
     if (!sema_check(&program.ast, &sema, &error)) {
         modules_report(&program, error.offset, error.message);
+        if (error.has_instantiation) {
+            modules_report(&program, error.instantiation_offset, "generic instantiated here");
+        }
         modules_destroy(&program);
         return EXIT_FAILURE;
     }

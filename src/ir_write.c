@@ -20,6 +20,9 @@ static void write_function_name(FILE *output, const IrModule *module, IrFunction
         write_module_prefix(output, function.module);
     }
     write_span(output, module, function.name);
+    if (function.specialization) {
+        fprintf(output, ".%" PRIu32, function.specialization);
+    }
 }
 
 static void write_type(FILE *output, const IrModule *module, SemaType type)
@@ -46,6 +49,9 @@ static void write_type(FILE *output, const IrModule *module, SemaType type)
         IrStructName record = module->struct_names[type.record];
         write_module_prefix(output, record.module);
         write_span(output, module, record.name);
+        if (record.specialization) {
+            fprintf(output, ".%" PRIu32, record.specialization);
+        }
     } else {
         fputs(sema_type_name(type.kind), output);
     }
@@ -257,11 +263,16 @@ static void write_instruction(FILE *output, const IrModule *module, IrInstructio
 
 bool ir_write(FILE *output, const IrModule *module)
 {
+    bool first = true;
     for (uint32_t i = 0; i < module->function_count; i++) {
         IrFunction fn = module->functions[i];
-        if (i) {
+        if (fn.template_only) {
+            continue;
+        }
+        if (!first) {
             fputc('\n', output);
         }
+        first = false;
         fputs(fn.external ? "ext fun @" : "fun @", output);
         write_function_name(output, module, fn);
         fputc('(', output);

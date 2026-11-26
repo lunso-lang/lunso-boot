@@ -36,7 +36,7 @@ static bool is_unsigned(TypeKind type)
 
 static bool entry_symbol(const IrModule *module, IrFunction function)
 {
-    return !function.external && !function.module && function.name.length == 4 &&
+    return !function.external && !function.specialization && !function.module && function.name.length == 4 &&
            memcmp(module->source + function.name.offset, "main", 4) == 0;
 }
 
@@ -45,7 +45,8 @@ static void write_symbol(FILE *out, const IrModule *module, uint32_t index)
     IrFunction function = module->functions[index];
     AstSpan name = function.name;
     fputc('$', out);
-    if (module->module_count > 1 && !function.external && !entry_symbol(module, function)) {
+    if (function.specialization ||
+        (module->module_count > 1 && !function.external && !entry_symbol(module, function))) {
         fprintf(out, ".lunso.fn.%" PRIu32 ".", index);
     }
     fwrite(module->source + name.offset, 1, name.length, out);
@@ -659,7 +660,7 @@ bool qbe_write(FILE *out, const IrModule *module)
     }
     for (uint32_t i = 0; i < module->function_count; i++) {
         IrFunction fn = module->functions[i];
-        if (!fn.external && !write_function(out, module, i)) {
+        if (!fn.template_only && !fn.external && !write_function(out, module, i)) {
             return false;
         }
     }

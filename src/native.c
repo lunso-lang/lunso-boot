@@ -17,7 +17,8 @@ static bool has_entry_point(const IrModule *module)
 {
     for (uint32_t i = 0; i < module->function_count; i++) {
         IrFunction fn = module->functions[i];
-        if (!fn.module && fn.name.length == 4 && memcmp(module->source + fn.name.offset, "main", 4) == 0) {
+        if (!fn.template_only && !fn.specialization && !fn.module && fn.name.length == 4 &&
+            memcmp(module->source + fn.name.offset, "main", 4) == 0) {
             return !fn.external && fn.result.kind == TYPE_I32 && fn.parameter_count == 0;
         }
     }

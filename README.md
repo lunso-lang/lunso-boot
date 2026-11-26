@@ -35,6 +35,38 @@ operand and accept any integer type as the count. Integer and floating-point
 types stay separate. Use an explicit cast such as `value as i32` for integer
 conversions that can lose values.
 
+## Generics
+
+Declare type parameters in brackets. Use `Vec[i32]` as a type and
+`swap.[i32](...)` to pass an explicit type argument to a function. Type
+arguments are full types, so `Vec[[4]u8]` stores four-byte arrays and
+`Vec[[]u8]` stores byte slices.
+
+```lunso
+struct Vec[T] {
+    data: *T
+    len: i64
+}
+
+fun swap[T](left: *T, right: *T) {
+    var temp = *left
+    *left = *right
+    *right = temp
+}
+
+fun example() {
+    var a: [4]u8 = [1, 2, 3, 4]
+    var b: [4]u8 = [5, 6, 7, 8]
+    swap.[[4]u8](&a, &b)
+}
+```
+
+The compiler checks each used specialization and reuses it for identical
+type arguments. It emits concrete functions and layouts, with no runtime
+type arguments. Generic functions follow the ordinary parameter rules,
+so pass fixed arrays and structs through pointers or slices. Type arguments
+at call sites are explicit.
+
 ## Enums
 
 Choose an integer backing type after the name. The first member defaults to

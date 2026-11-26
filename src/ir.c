@@ -13,6 +13,8 @@ typedef struct {
     const Sema *sema;
     IrModule *module;
     IrFunction *function;
+    const AstFunction *declaration;
+    const SemaFunction *instance;
     uint32_t instruction_capacity;
     uint32_t argument_capacity;
     uint32_t next_value;
@@ -123,12 +125,18 @@ static void store(Lowering *lowering, SemaType type, uint32_t slot, uint32_t val
     emit(lowering, (IrInstruction){.op = IR_STORE, .type = type, .a = slot, .b = value});
 }
 
+static const SemaNode *lower_node(const Lowering *lowering, AstNodeId id)
+{
+    return sema_function_node(lowering->sema, lowering->declaration, lowering->instance, id);
+}
+
 static uint32_t lower_const(Lowering *lowering, SemaNode info)
 {
     const Ast *ast = lowering->ast;
-    AstNodeId str_node = lowering->sema->const_strings[info.binding];
+    SemaConstant constant = lowering->sema->constants[info.binding];
+    AstNodeId str_node = constant.string;
     if (str_node != AST_NODE_NONE) {
-        SemaType str_type = lowering->sema->nodes[str_node].type;
+        SemaType str_type = lower_node(lowering, str_node)->type;
         uint32_t bytes = emit_value(lowering, IR_BYTES, str_type,
                                     ast->positions[str_node], ast->data[str_node].a, 0);
         if (info.type.kind == TYPE_SLICE) {
@@ -136,7 +144,7 @@ static uint32_t lower_const(Lowering *lowering, SemaNode info)
         }
         return bytes;
     }
-    uint64_t bits = lowering->sema->const_values[info.binding];
+    uint64_t bits = constant.bits;
     return emit_value(lowering, info.type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
                       info.type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
 }
@@ -147,7 +155,7 @@ static void lower_statement(Lowering *lowering, AstNodeId id);
 static uint32_t lower_index(Lowering *lowering, AstNodeId id)
 {
     uint32_t index = lower_expression(lowering, id);
-    SemaType type = lowering->sema->nodes[id].type;
+    SemaType type = lower_node(lowering, id)->type;
     if (type.kind == TYPE_I64 || type.kind == TYPE_U64) {
         return index;
     }
@@ -159,9 +167,9 @@ static uint32_t lower_element_address(Lowering *lowering, AstNodeId id)
     AstNodeData node = lowering->ast->data[id];
     uint32_t base = lower_expression(lowering, node.a);
     uint32_t index = lower_index(lowering, node.b);
-    SemaType type = lowering->sema->nodes[node.a].type;
+    SemaType type = lower_node(lowering, node.a)->type;
     if (type.kind == TYPE_POINTER) {
-        return emit_value(lowering, IR_POINTER_INDEX, lowering->sema->nodes[id].type, base, index, 0);
+        return emit_value(lowering, IR_POINTER_INDEX, lower_node(lowering, id)->type, base, index, 0);
     }
     return emit_value(lowering, IR_ELEMENT_ADDRESS, type, base, index, 0);
 }
@@ -177,8 +185,8 @@ static uint32_t lower_memory_address(Lowering *lowering, AstNodeId id)
     if (kind == AST_DEREFERENCE) {
         return value;
     }
-    return emit_value(lowering, IR_FIELD_ADDRESS, lowering->sema->nodes[base].type,
-                      value, lowering->sema->nodes[id].binding, 0);
+    return emit_value(lowering, IR_FIELD_ADDRESS, lower_node(lowering, base)->type,
+                      value, lower_node(lowering, id)->binding, 0);
 }
 
 static bool uses_storage(SemaType type)
@@ -195,7 +203,7 @@ static uint32_t lower_call(Lowering *lowering, AstNodeId id)
 {
     const Ast *ast = lowering->ast;
     IrModule *module = lowering->module;
-    SemaNode info = lowering->sema->nodes[id];
+    SemaNode info = *lower_node(lowering, id);
     AstNodeData call = ast->data[id];
     if (info.builtin == BUILTIN_SIZE_OF) {
         return emit_value(lowering, IR_IMMEDIATE, info.type, info.binding, 0, 0);
@@ -204,7 +212,7 @@ static uint32_t lower_call(Lowering *lowering, AstNodeId id)
         AstNodeId argument = ast->children[call.a + 1];
         uint32_t value = lower_expression(lowering, argument);
         IrOp op = info.builtin == BUILTIN_LEN ? IR_LEN : IR_DATA;
-        return emit_value(lowering, op, lowering->sema->nodes[argument].type, value, 0, 0);
+        return emit_value(lowering, op, lower_node(lowering, argument)->type, value, 0, 0);
     }
     uint32_t count = call.b - 1;
     uint32_t first = module->argument_count;
@@ -258,7 +266,7 @@ static uint32_t lower_binary(Lowering *lowering, AstNodeId id)
 {
     AstKind kind = lowering->ast->kinds[id];
     AstNodeData data = lowering->ast->data[id];
-    SemaType type = lowering->sema->nodes[id].type;
+    SemaType type = lower_node(lowering, id)->type;
     if (kind == AST_LOGICAL_AND || kind == AST_LOGICAL_OR) {
         return lower_logical(lowering, kind, data, type);
     }
@@ -267,7 +275,7 @@ static uint32_t lower_binary(Lowering *lowering, AstNodeId id)
         bool memory = target_kind == AST_INDEX || target_kind == AST_MEMBER ||
                       target_kind == AST_DEREFERENCE;
         uint32_t target = memory ? lower_memory_address(lowering, data.a)
-                                 : lowering->sema->nodes[data.a].binding;
+                                 : lower_node(lowering, data.a)->binding;
         if (uses_storage(type)) {
             uint32_t address = memory ? target : emit_value(lowering, IR_LOAD, type, target, 0, 0);
             uint32_t source = lower_expression(lowering, data.b);
@@ -295,7 +303,7 @@ static uint32_t lower_binary(Lowering *lowering, AstNodeId id)
     uint32_t left = lower_expression(lowering, data.a);
     uint32_t right = lower_expression(lowering, data.b);
     // Comparison results are bool. The instruction still needs the operand type.
-    SemaNode left_info = lowering->sema->nodes[data.a];
+    SemaNode left_info = *lower_node(lowering, data.a);
     SemaType operand = left_info.type;
     if (left_info.promotion != TYPE_INVALID) {
         operand.kind = left_info.promotion;
@@ -305,7 +313,7 @@ static uint32_t lower_binary(Lowering *lowering, AstNodeId id)
 
 static uint32_t number(Lowering *lowering, AstNodeId id, bool negative)
 {
-    return emit_value(lowering, IR_NUMBER, lowering->sema->nodes[id].type,
+    return emit_value(lowering, IR_NUMBER, lower_node(lowering, id)->type,
                       lowering->ast->positions[id], lowering->ast->data[id].a, negative);
 }
 
@@ -315,7 +323,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         return 0;
     }
     const Ast *ast = lowering->ast;
-    const SemaNode info = lowering->sema->nodes[id];
+    const SemaNode info = *lower_node(lowering, id);
     AstNodeData data = ast->data[id];
     AstKind kind = ast->kinds[id];
     switch (kind) {
@@ -351,7 +359,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         init_storage(lowering, info.type, address, 0);
         for (uint32_t i = 1; i < data.b && !lowering->failed; i++) {
             AstNodeId init = ast->children[data.a + i];
-            SemaNode field_info = lowering->sema->nodes[init];
+            SemaNode field_info = *lower_node(lowering, init);
             uint32_t field_addr = emit_value(lowering, IR_FIELD_ADDRESS, field_info.type,
                                              address, field_info.binding, 0);
             uint32_t val = lower_expression(lowering, ast->data[init].b);
@@ -369,10 +377,10 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
     case AST_CAST: {
         uint32_t source = lower_expression(lowering, data.a);
         return emit_value(lowering, IR_CAST, info.type, source,
-                          lowering->sema->nodes[data.a].type.kind, 0);
+                          lower_node(lowering, data.a)->type.kind, 0);
     }
     case AST_ADDRESS_OF: {
-        SemaNode target = lowering->sema->nodes[data.a];
+        SemaNode target = *lower_node(lowering, data.a);
         if (uses_storage(target.type)) {
             return lower_expression(lowering, data.a);
         }
@@ -400,7 +408,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
         AstNodeData bounds = ast->data[data.b];
         uint32_t start = lower_index(lowering, bounds.a);
         uint32_t end = lower_index(lowering, bounds.b);
-        SemaType source_type = lowering->sema->nodes[data.a].type;
+        SemaType source_type = lower_node(lowering, data.a)->type;
         if (source_type.kind == TYPE_POINTER) {
             return emit_value(lowering, IR_POINTER_SLICE, info.type, base, start, end);
         }
@@ -426,7 +434,7 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
 static uint32_t lower_expression(Lowering *lowering, AstNodeId id)
 {
     uint32_t value = lower_unconverted_expression(lowering, id);
-    SemaNode info = lowering->sema->nodes[id];
+    SemaNode info = *lower_node(lowering, id);
     if (info.borrow_array) {
         return emit_value(lowering, IR_ARRAY_VIEW, info.type, value, 0, 0);
     }
@@ -442,26 +450,25 @@ static void lower_if(Lowering *lowering, AstNodeId id)
 {
     AstNodeData data = lowering->ast->data[id];
     AstIfBranches arms = lowering->ast->if_branches[data.b];
-    const SemaNode *nodes = lowering->sema->nodes;
     uint32_t condition = lower_expression(lowering, data.a);
     uint32_t yes = label(lowering);
     uint32_t no = label(lowering);
-    uint32_t end = arms.else_branch && nodes[id].falls_through ? label(lowering) : no;
+    uint32_t end = arms.else_branch && lower_node(lowering, id)->falls_through ? label(lowering) : no;
     branch(lowering, condition, yes, no);
 
     emit_label(lowering, yes);
     lower_statement(lowering, arms.then_branch);
-    if (nodes[arms.then_branch].falls_through) {
+    if (lower_node(lowering, arms.then_branch)->falls_through) {
         jump(lowering, end);
     }
     if (arms.else_branch) {
         emit_label(lowering, no);
         lower_statement(lowering, arms.else_branch);
-        if (nodes[arms.else_branch].falls_through) {
+        if (lower_node(lowering, arms.else_branch)->falls_through) {
             jump(lowering, end);
         }
     }
-    if (nodes[id].falls_through) {
+    if (lower_node(lowering, id)->falls_through) {
         emit_label(lowering, end);
     }
 }
@@ -472,7 +479,7 @@ static void lower_match(Lowering *lowering, AstNodeId id)
     AstNodeData data = ast->data[id];
     AstNodeId scrutinee = ast->children[data.a];
     uint32_t scrut = lower_expression(lowering, scrutinee);
-    SemaType scrut_type = lowering->sema->nodes[scrutinee].type;
+    SemaType scrut_type = lower_node(lowering, scrutinee)->type;
     uint32_t end_label = label(lowering);
     uint32_t arm_count = data.b - 1;
 
@@ -482,7 +489,7 @@ static void lower_match(Lowering *lowering, AstNodeId id)
         AstNodeId body = ast->children[arm.a + arm.b - 1];
         if (arm.b == 1) {
             lower_statement(lowering, body);
-            if (lowering->sema->nodes[body].falls_through) {
+            if (lower_node(lowering, body)->falls_through) {
                 jump(lowering, end_label);
             }
             break;
@@ -496,7 +503,7 @@ static void lower_match(Lowering *lowering, AstNodeId id)
         } else {
             for (uint32_t p = 0; p < arm.b - 1 && !lowering->failed; p++) {
                 AstNodeId pat = ast->children[arm.a + p];
-                uint64_t bits = lowering->sema->match_values[lowering->sema->nodes[pat].binding];
+                uint64_t bits = lowering->sema->match_values[lower_node(lowering, pat)->binding];
                 uint32_t pat_val = emit_value(lowering,
                                               scrut_type.kind == TYPE_BOOL ? IR_BOOL : IR_IMMEDIATE,
                                               scrut_type, (uint32_t)bits, (uint32_t)(bits >> 32), 0);
@@ -511,7 +518,7 @@ static void lower_match(Lowering *lowering, AstNodeId id)
         }
         emit_label(lowering, arm_body);
         lower_statement(lowering, body);
-        if (lowering->sema->nodes[body].falls_through) {
+        if (lower_node(lowering, body)->falls_through) {
             jump(lowering, end_label);
         }
         if (!is_last) {
@@ -519,7 +526,7 @@ static void lower_match(Lowering *lowering, AstNodeId id)
         }
     }
 
-    if (lowering->sema->nodes[id].falls_through) {
+    if (lower_node(lowering, id)->falls_through) {
         emit_label(lowering, end_label);
     }
 }
@@ -555,10 +562,10 @@ static void lower_loop(Lowering *lowering, AstNodeId id)
         emit_label(lowering, continue_target);
         lower_expression(lowering, header.step);
         jump(lowering, start);
-    } else if (lowering->sema->nodes[data.b].falls_through) {
+    } else if (lower_node(lowering, data.b)->falls_through) {
         jump(lowering, start);
     }
-    if (header.condition || lowering->sema->nodes[id].falls_through) {
+    if (header.condition || lower_node(lowering, id)->falls_through) {
         emit_label(lowering, end);
     }
 }
@@ -575,7 +582,7 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
         for (uint32_t i = 0; i < data.b && !lowering->failed; i++) {
             AstNodeId child = ast->children[data.a + i];
             lower_statement(lowering, child);
-            if (!lowering->sema->nodes[child].falls_through) {
+            if (!lower_node(lowering, child)->falls_through) {
                 break;
             }
         }
@@ -596,15 +603,15 @@ static void lower_statement(Lowering *lowering, AstNodeId id)
         lower_loop(lowering, id);
         break;
     case AST_BREAK:
-        jump(lowering, lowering->loops[lowering->sema->nodes[id].binding].break_label);
+        jump(lowering, lowering->loops[lower_node(lowering, id)->binding].break_label);
         break;
     case AST_CONTINUE:
-        jump(lowering, lowering->loops[lowering->sema->nodes[id].binding].continue_label);
+        jump(lowering, lowering->loops[lower_node(lowering, id)->binding].continue_label);
         break;
     case AST_CONST:
         break;
     case AST_VAR: {
-        SemaNode info = lowering->sema->nodes[id];
+        SemaNode info = *lower_node(lowering, id);
         AstNodeId initializer = ast->variables[data.a].initializer;
         if (uses_storage(info.type)) {
             uint32_t address = emit_value(lowering, IR_STORAGE_ALLOC, info.type, 0, 0, 0);
@@ -628,22 +635,30 @@ static void lower_function(Lowering *lowering, uint32_t index)
 {
     const Ast *ast = lowering->ast;
     IrModule *module = lowering->module;
-    AstFunction function = ast->functions[index];
-    SemaFunction checked = lowering->sema->functions[index];
+    const SemaFunction *checked = &lowering->sema->functions[index];
+    const AstFunction *declaration = &ast->functions[checked->declaration];
+    AstFunction function = *declaration;
+    lowering->declaration = declaration;
+    lowering->instance = checked;
     IrFunction *output = &module->functions[index];
+    if (function.type_parameters.count && !checked->arguments) {
+        output->template_only = true;
+        return;
+    }
     *output = (IrFunction){
         .name = function.name,
-        .result = checked.result,
+        .specialization = checked->arguments ? index + 1 : 0,
+        .result = checked->result,
         .first_parameter = module->parameter_count,
         .parameter_count = function.parameters.count,
         .first_instruction = module->instruction_count,
-        .slot_count = checked.slot_count,
+        .slot_count = checked->slot_count,
         .module = function.module,
         .external = function.body == AST_NODE_NONE,
     };
     for (uint32_t i = 0; i < function.parameters.count; i++) {
         AstNodeId param = ast->children[function.parameters.first + i];
-        module->parameters[module->parameter_count++] = lowering->sema->nodes[param].type;
+        module->parameters[module->parameter_count++] = lower_node(lowering, param)->type;
     }
     if (output->external) {
         return;
@@ -654,7 +669,7 @@ static void lower_function(Lowering *lowering, uint32_t index)
     lowering->next_label = 0;
     emit_label(lowering, label(lowering));
     lower_statement(lowering, function.body);
-    if (lowering->sema->nodes[function.body].falls_through) {
+    if (lower_node(lowering, function.body)->falls_through) {
         emit(lowering, (IrInstruction){.op = IR_RETURN});
     }
     output->instruction_count = module->instruction_count - output->first_instruction;
@@ -662,16 +677,18 @@ static void lower_function(Lowering *lowering, uint32_t index)
 
 bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
 {
-    *out = (IrModule){.source = ast->source, .function_count = ast->function_count,
+    *out = (IrModule){.source = ast->source, .function_count = sema->function_count,
                       .module_count = ast->module_count};
-    if (ast->struct_count) {
-        out->struct_names = calloc(ast->struct_count, sizeof(*out->struct_names));
+    if (sema->record_count) {
+        out->struct_names = calloc(sema->record_count, sizeof(*out->struct_names));
         if (!out->struct_names) {
             ir_destroy(out);
             return false;
         }
-        for (uint32_t i = 0; i < ast->struct_count; i++) {
-            out->struct_names[i] = (IrStructName){ast->structs[i].name, ast->structs[i].module};
+        for (uint32_t i = 0; i < sema->record_count; i++) {
+            AstStruct declaration = ast->structs[sema->records[i].declaration];
+            out->struct_names[i] = (IrStructName){declaration.name, declaration.module,
+                                                sema->records[i].arguments ? i + 1 : 0};
         }
     }
     if (sema->pointee_count) {
@@ -692,15 +709,23 @@ bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
         }
         memcpy(out->elements, sema->elements, sema->element_count * sizeof(*out->elements));
     }
-    if (ast->function_count == 0) {
+    if (sema->function_count == 0) {
         return true;
     }
     uint32_t parameter_count = 0;
-    for (uint32_t i = 0; i < ast->function_count; i++) {
-        // Every parameter occupies a distinct slot in the AST child table.
-        parameter_count += ast->functions[i].parameters.count;
+    for (uint32_t i = 0; i < sema->function_count; i++) {
+        const SemaFunction *function = &sema->functions[i];
+        AstFunction declaration = ast->functions[function->declaration];
+        if (declaration.type_parameters.count && !function->arguments) {
+            continue;
+        }
+        if (declaration.parameters.count > UINT32_MAX - parameter_count) {
+            ir_destroy(out);
+            return false;
+        }
+        parameter_count += declaration.parameters.count;
     }
-    out->functions = calloc(ast->function_count, sizeof(*out->functions));
+    out->functions = calloc(sema->function_count, sizeof(*out->functions));
     if (parameter_count) {
         out->parameters = calloc(parameter_count, sizeof(*out->parameters));
     }
@@ -709,7 +734,7 @@ bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
         return false;
     }
     Lowering lowering = {.ast = ast, .sema = sema, .module = out};
-    for (uint32_t i = 0; i < ast->function_count && !lowering.failed; i++) {
+    for (uint32_t i = 0; i < sema->function_count && !lowering.failed; i++) {
         lower_function(&lowering, i);
     }
     if (lowering.failed) {

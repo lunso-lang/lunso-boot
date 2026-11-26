@@ -209,7 +209,7 @@ static SemaType element_type(const Checker *checker, SemaType collection)
     return checker->sema->elements[collection.element_type];
 }
 
-static uint32_t type_byte_size(SemaType type)
+uint32_t sema_type_size(SemaType type)
 {
     if (type.kind == TYPE_STRUCT || type.kind == TYPE_ARRAY) {
         return sema_storage_size(type);
@@ -260,7 +260,7 @@ static SemaType make_collection(Checker *checker, AstNodeId id, TypeKind kind,
         .length = length,
         .element = element.kind,
         .element_type = index,
-        .element_size = type_byte_size(element),
+        .element_size = sema_type_size(element),
         .record = element.record,
         .record_size = element.record_size,
         .pointee = element.pointee,
@@ -272,9 +272,6 @@ static SemaType pointer_to(Checker *checker, AstNodeId id, SemaType pointee, boo
 {
     if (failed(checker)) {
         return no_type;
-    }
-    if (pointee.kind == TYPE_ARRAY) {
-        return fail(checker, id, "take the address of an array element instead");
     }
     SemaType result = {.kind = TYPE_POINTER, .read_only = read_only};
     Sema *sema = checker->sema;
@@ -519,7 +516,7 @@ static void layout_struct(Checker *checker, uint32_t index)
                     checker->module = saved_module;
                     return;
                 }
-                width = type_byte_size(type);
+                width = sema_type_size(type);
                 if (ast->kinds[leaf] == AST_ARRAY_TYPE) {
                     field_align = sema_scalar_size(TYPE_POINTER);
                 } else {
@@ -639,7 +636,7 @@ static SemaType resolve_type(Checker *checker, AstNodeId id)
 
         uint32_t elem_size = sema_element_size(collection);
         uint32_t length = 0;
-        if (elem_size && !resolve_array_length(checker, data.b, elem_size, &length)) {
+        if (!resolve_array_length(checker, data.b, elem_size, &length)) {
             return no_type;
         }
         return make_collection(checker, id, TYPE_ARRAY, length, element);
@@ -1056,14 +1053,8 @@ static SemaType check_size_of(Checker *checker, AstNodeId id)
         return fail(checker, id, "size_of expects one argument");
     }
     SemaType type = value(checker, ast->children[node.a + 1], no_type);
-    uint32_t size = sema_scalar_size(type.kind);
-    if (type.kind == TYPE_STRUCT || type.kind == TYPE_ARRAY) {
-        size = sema_storage_size(type);
-    } else if (type.kind == TYPE_SLICE) {
-        size = 2 * sema_scalar_size(TYPE_POINTER);
-    }
     checker->sema->nodes[id].builtin = BUILTIN_SIZE_OF;
-    checker->sema->nodes[id].binding = size;
+    checker->sema->nodes[id].binding = sema_type_size(type);
     return (SemaType){.kind = TYPE_U64};
 }
 
@@ -1199,8 +1190,14 @@ typedef enum { NO_ADDRESS, READ_ONLY_ADDRESS, WRITABLE_ADDRESS } AddressAccess;
 static AddressAccess address_access(const Checker *checker, AstNodeId id)
 {
     const Ast *ast = checker->ast;
-    if (checker->sema->nodes[id].is_enum_case || checker->sema->nodes[id].is_const) {
+    SemaNode info = checker->sema->nodes[id];
+    if (info.is_enum_case) {
         return NO_ADDRESS;
+    }
+    if (info.is_const) {
+        return info.type.kind == TYPE_ARRAY &&
+               checker->sema->const_strings[info.binding] != AST_NODE_NONE
+               ? READ_ONLY_ADDRESS : NO_ADDRESS;
     }
     while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
         AstNodeId base = ast->data[id].a;

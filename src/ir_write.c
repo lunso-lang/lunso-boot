@@ -24,28 +24,30 @@ static void write_function_name(FILE *output, const IrModule *module, IrFunction
 
 static void write_type(FILE *output, const IrModule *module, SemaType type)
 {
-    TypeKind kind = type.kind;
-    if (kind == TYPE_ARRAY) {
-        fprintf(output, "[%" PRIu32 "]", type.length);
-        kind = type.element;
-    } else if (kind == TYPE_SLICE) {
-        fputs("[]", output);
-        kind = type.element;
-    }
-    while (kind == TYPE_POINTER) {
-        fputc('*', output);
-        if (type.read_only) {
-            fputs("const ", output);
+    for (;;) {
+        if (type.kind == TYPE_POINTER) {
+            fputc('*', output);
+            if (type.read_only) {
+                fputs("const ", output);
+            }
+            type = module->pointees[type.pointee];
+        } else if (type.kind == TYPE_ARRAY || type.kind == TYPE_SLICE) {
+            if (type.kind == TYPE_ARRAY) {
+                fprintf(output, "[%" PRIu32 "]", type.length);
+            } else {
+                fputs("[]", output);
+            }
+            type = module->elements[type.element_type];
+        } else {
+            break;
         }
-        type = module->pointees[type.pointee];
-        kind = type.kind;
     }
-    if (kind == TYPE_STRUCT) {
+    if (type.kind == TYPE_STRUCT) {
         IrStructName record = module->struct_names[type.record];
         write_module_prefix(output, record.module);
         write_span(output, module, record.name);
     } else {
-        fputs(sema_type_name(kind), output);
+        fputs(sema_type_name(type.kind), output);
     }
 }
 

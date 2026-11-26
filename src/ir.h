@@ -53,6 +53,7 @@ typedef struct {
     const unsigned char *source;  // Borrowed for names and literal spellings.
     IrStructName *struct_names;   // Indexed by SemaType.record.
     SemaType *pointees;            // Indexed by SemaType.pointee.
+    SemaType *elements;            // Indexed by SemaType.element_type.
     IrFunction *functions;
     uint32_t function_count;
     SemaType *parameters;

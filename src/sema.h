@@ -68,3 +68,4 @@ const char *sema_type_name(TypeKind type);
 uint32_t sema_scalar_size(TypeKind type);
 uint32_t sema_element_size(SemaType type);
 uint32_t sema_storage_size(SemaType type);
+uint32_t sema_type_size(SemaType type);

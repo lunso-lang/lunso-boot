@@ -1,6 +1,7 @@
 #include "ir.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 typedef struct {
     uint32_t break_label;
@@ -371,12 +372,12 @@ static uint32_t lower_unconverted_expression(Lowering *lowering, AstNodeId id)
                           lowering->sema->nodes[data.a].type.kind, 0);
     }
     case AST_ADDRESS_OF: {
-        if (ast->kinds[data.a] != AST_IDENTIFIER) {
-            return lower_memory_address(lowering, data.a);
-        }
         SemaNode target = lowering->sema->nodes[data.a];
         if (uses_storage(target.type)) {
             return lower_expression(lowering, data.a);
+        }
+        if (ast->kinds[data.a] != AST_IDENTIFIER) {
+            return lower_memory_address(lowering, data.a);
         }
         return emit_value(lowering, IR_LOCAL_ADDRESS, target.type, target.binding, 0, 0);
     }
@@ -683,6 +684,14 @@ bool ir_lower(const Ast *ast, const Sema *sema, IrModule *out)
             out->pointees[i] = sema->pointees[i];
         }
     }
+    if (sema->element_count) {
+        out->elements = calloc(sema->element_count, sizeof(*out->elements));
+        if (!out->elements) {
+            ir_destroy(out);
+            return false;
+        }
+        memcpy(out->elements, sema->elements, sema->element_count * sizeof(*out->elements));
+    }
     if (ast->function_count == 0) {
         return true;
     }
@@ -714,6 +723,7 @@ void ir_destroy(IrModule *module)
 {
     free(module->struct_names);
     free(module->pointees);
+    free(module->elements);
     free(module->functions);
     free(module->parameters);
     free(module->instructions);

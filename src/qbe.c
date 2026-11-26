@@ -178,11 +178,12 @@ static void write_access(FILE *out, IrInstruction inst)
 {
     bool slice = inst.op == IR_SLICE || inst.op == IR_POINTER_SLICE;
     uint32_t bound = slice ? inst.c : inst.b;
+    uint32_t element_size = sema_element_size(inst.type);
     // Unsigned comparisons also reject negative indices widened from signed types.
     fprintf(out, "\t%%in%" PRIu32 " =w %s %%v%" PRIu32 ", ",
             inst.result, slice ? "culel" : "cultl", bound);
     if (inst.op == IR_POINTER_SLICE) {
-        fprintf(out, "%" PRIu64, (uint64_t)INT64_MAX / sema_element_size(inst.type));
+        fprintf(out, "%" PRIu64, (uint64_t)INT64_MAX / (element_size ? element_size : 1));
     } else {
         write_length(out, inst.type, inst.a);
     }
@@ -196,7 +197,7 @@ static void write_access(FILE *out, IrInstruction inst)
     fprintf(out, "\tjnz %%in%" PRIu32 ", @array_ok%" PRIu32 ", @bounds_fail\n",
             inst.result, inst.result);
     fprintf(out, "@array_ok%" PRIu32 "\n", inst.result);
-    write_index_address(out, inst, sema_element_size(inst.type));
+    write_index_address(out, inst, element_size);
     if (slice) {
         fprintf(out, "\t%%len%" PRIu32 " =l sub %%v%" PRIu32 ", %%v%" PRIu32 "\n",
                 inst.result, inst.c, inst.b);
@@ -239,17 +240,6 @@ static char memory_suffix(TypeKind type)
 {
     uint32_t size = sema_scalar_size(type);
     return size == 1 ? 'b' : size == 2 ? 'h' : types[type].base;
-}
-
-static uint32_t value_size(SemaType type)
-{
-    if (type.kind == TYPE_STRUCT || type.kind == TYPE_ARRAY) {
-        return sema_storage_size(type);
-    }
-    if (type.kind == TYPE_SLICE) {
-        return 2 * sema_scalar_size(TYPE_POINTER);
-    }
-    return sema_scalar_size(type.kind);
 }
 
 static void write_load(FILE *out, TypeKind kind, uint32_t result, const char *name, uint32_t address)
@@ -489,7 +479,7 @@ static void write_instruction(FILE *out, const IrModule *module, uint32_t index,
         write_access(out, inst);
         break;
     case IR_POINTER_INDEX:
-        write_index_address(out, inst, value_size(inst.type));
+        write_index_address(out, inst, sema_type_size(inst.type));
         break;
     case IR_FIELD_ADDRESS:
         fprintf(out, "\t%%v%" PRIu32 " =l add %%v%" PRIu32 ", %" PRIu32 "\n",

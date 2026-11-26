@@ -145,6 +145,11 @@ byte pointers preserve read-only access. `size_of(value)` produces a `u64`
 byte size at compile time without evaluating the value. Use
 `ptr[start..end]` to borrow a read-only slice over a valid pointer range.
 
+`*[N]T` points to an entire fixed array. For `p: *[4]u8`, `p[1]` is the
+next four-byte array and `p[1][2]` selects one byte in that array.
+`&array` takes the address of the whole array, and `&array[0]` takes the
+address of its first element.
+
 ## Files
 
 `std.file` reads and writes byte sequences. Use

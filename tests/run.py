@@ -167,9 +167,6 @@ class TestCliAndFrontEnd(unittest.TestCase):
         self.assertNotEqual(dup_std.returncode, 0)
         self.assertIn("--std can only be supplied once", dup_std.stderr)
 
-        missing_out = run_cmd([LUNSO, "--build", ROOT / "examples" / "answer.lunso"])
-        self.assertNotEqual(missing_out.returncode, 0)
-
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "same.lunso"
             src.write_text((ROOT / "examples" / "answer.lunso").read_text(encoding="utf-8"), encoding="utf-8")
@@ -235,6 +232,38 @@ class TestExamples(unittest.TestCase):
             run = run_cmd([exe], cwd=workdir)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual((workdir / "output.txt").read_text(encoding="utf-8"), "Hello from std.file\n")
+
+
+class TestCliOptions(unittest.TestCase):
+    def test_help_version_and_unknown_flags(self) -> None:
+        help_res = run_cmd([LUNSO, "--help"])
+        self.assertEqual(help_res.returncode, 0)
+        self.assertIn("--build", help_res.stdout)
+
+        short_help = run_cmd([LUNSO, "-h"])
+        self.assertEqual(short_help.returncode, 0)
+        self.assertIn("--check", short_help.stdout)
+
+        ver_res = run_cmd([LUNSO, "--version"])
+        self.assertEqual(ver_res.returncode, 0)
+        self.assertIn("lunso-boot", ver_res.stdout)
+
+        unknown = run_cmd([LUNSO, "--bogus-flag", ROOT / "examples" / "answer.lunso"])
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("unknown option", unknown.stderr)
+
+    def test_flexible_flag_order_std_space_and_default_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            check_res = run_cmd([LUNSO, ROOT / "examples" / "arena.lunso", "--std", STD_DIR, "--check"])
+            self.assertEqual(check_res.returncode, 0, check_res.stderr)
+
+            build_res = run_cmd([LUNSO, "--build", ROOT / "examples" / "answer.lunso"], cwd=workdir)
+            self.assertEqual(build_res.returncode, 0, build_res.stderr)
+            default_exe = workdir / "answer"
+            self.assertTrue(default_exe.exists())
+            run_res = run_cmd([default_exe], cwd=workdir)
+            self.assertEqual(run_res.returncode, 42)
 
 
 if __name__ == "__main__":

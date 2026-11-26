@@ -217,15 +217,61 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     return ok && fflush(stdout) != EOF && !ferror(stdout) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
-static bool is_std_option(const char *argument)
+static void print_usage(FILE *out, const char *prog)
 {
-    return strncmp(argument, "--std=", sizeof("--std=") - 1) == 0;
+    fprintf(out, "usage: %s [options] <source.lunso>\n", prog);
+    fprintf(out, "       %s --build [options] <source.lunso> [-o <executable>] [--link <object>]...\n",
+            prog);
 }
 
-static bool set_std_option(const char *argument, const char **std_dir)
+static void print_help(const char *prog)
 {
-    const char *path = argument + sizeof("--std=") - 1;
-    if (!*path) {
+    print_usage(stdout, prog);
+    fputs("\nModes:\n"
+          "  (default)        Dump lexer tokens\n"
+          "  --parse          Parse and report AST summary\n"
+          "  --check          Run module loading and semantic checks\n"
+          "  --emit-ir        Emit Lunso IR to stdout\n"
+          "  --emit-qbe       Emit QBE IL to stdout\n"
+          "  --build          Compile and link a native executable\n"
+          "\nOptions:\n"
+          "  --std=<dir>      Override standard library directory\n"
+          "  --std <dir>      Override standard library directory\n"
+          "  -o <file>        Output executable path (with --build; defaults to <stem>)\n"
+          "  --link <obj>     Link an additional object or archive (with --build)\n"
+          "  -h, --help       Show this help message and exit\n"
+          "  -V, --version    Show compiler version and exit\n",
+          stdout);
+}
+
+static char *default_output_name(const char *path)
+{
+    const char *slash = strrchr(path, '/');
+    const char *base = slash ? slash + 1 : path;
+    size_t len = strlen(base);
+    static const char ext[] = ".lunso";
+    size_t ext_len = sizeof(ext) - 1;
+    if (len > ext_len && strcmp(base + len - ext_len, ext) == 0) {
+        size_t stem_len = len - ext_len;
+        char *out = malloc(stem_len + 1);
+        if (out) {
+            memcpy(out, base, stem_len);
+            out[stem_len] = '\0';
+        }
+        return out;
+    }
+    static const char suffix[] = ".out";
+    char *out = malloc(len + sizeof(suffix));
+    if (out) {
+        memcpy(out, base, len);
+        memcpy(out + len, suffix, sizeof(suffix));
+    }
+    return out;
+}
+
+static bool set_std_dir(const char *path, const char **std_dir)
+{
+    if (!path || !*path) {
         fputs("--std requires a directory path\n", stderr);
         return false;
     }
@@ -235,41 +281,6 @@ static bool set_std_option(const char *argument, const char **std_dir)
     }
     *std_dir = path;
     return true;
-}
-
-static bool parse_source_options(Mode mode, int argc, char **argv, int first,
-                                 NativeOptions *native, const char **std_dir)
-{
-    size_t link_capacity = (size_t)(argc - first) / 2;
-    for (int i = first; i < argc;) {
-        const char *option = argv[i++];
-        if (is_std_option(option)) {
-            if (!set_std_option(option, std_dir)) {
-                return false;
-            }
-            continue;
-        }
-        if (mode != MODE_BUILD || i == argc) {
-            return false;
-        }
-        const char *value = argv[i++];
-        if (strcmp(option, "-o") == 0 && !native->output) {
-            native->output = value;
-            continue;
-        }
-        if (strcmp(option, "--link") != 0) {
-            return false;
-        }
-        if (!native->objects) {
-            native->objects = calloc(link_capacity, sizeof(*native->objects));
-            if (!native->objects) {
-                fputs("could not allocate link options\n", stderr);
-                return false;
-            }
-        }
-        native->objects[native->object_count++] = value;
-    }
-    return mode != MODE_BUILD || native->output != NULL;
 }
 
 static int run_source(Mode mode, const char *path, const NativeOptions *native, const char *std_dir)
@@ -294,54 +305,152 @@ static int run_source(Mode mode, const char *path, const NativeOptions *native, 
     return result;
 }
 
-static Mode parse_mode(const char *argument)
+static bool try_parse_mode(const char *argument, Mode *out_mode)
 {
     if (strcmp(argument, "--parse") == 0) {
-        return MODE_PARSE;
+        *out_mode = MODE_PARSE;
+        return true;
     }
     if (strcmp(argument, "--check") == 0) {
-        return MODE_CHECK;
+        *out_mode = MODE_CHECK;
+        return true;
     }
     if (strcmp(argument, "--emit-ir") == 0) {
-        return MODE_EMIT_IR;
+        *out_mode = MODE_EMIT_IR;
+        return true;
     }
     if (strcmp(argument, "--emit-qbe") == 0) {
-        return MODE_EMIT_QBE;
+        *out_mode = MODE_EMIT_QBE;
+        return true;
     }
     if (strcmp(argument, "--build") == 0) {
-        return MODE_BUILD;
+        *out_mode = MODE_BUILD;
+        return true;
     }
-    return MODE_TOKENS;
+    return false;
 }
 
 int main(int argc, char **argv)
 {
     const char *std_dir = NULL;
-    int next = 1;
-    bool valid = true;
-    while (valid && next < argc && is_std_option(argv[next])) {
-        valid = set_std_option(argv[next++], &std_dir);
-    }
-    Mode mode = next < argc ? parse_mode(argv[next]) : MODE_TOKENS;
-    if (mode != MODE_TOKENS) {
-        next++;
-        while (valid && next < argc && is_std_option(argv[next])) {
-            valid = set_std_option(argv[next++], &std_dir);
-        }
-    }
+    const char *path = NULL;
+    Mode mode = MODE_TOKENS;
+    bool mode_set = false;
+    bool stop_options = false;
     NativeOptions native = {0};
-    const char *path = next < argc ? argv[next++] : NULL;
-    valid = valid && path && parse_source_options(mode, argc, argv, next, &native, &std_dir);
-    if (!valid) {
-        fprintf(stderr, "usage: %s [--std=<directory>] [--parse | --check | --emit-ir | --emit-qbe] <source.lunso>\n",
-                argv[0]);
-        fprintf(stderr, "       %s [--std=<directory>] --build <source.lunso> -o <executable> [--link <object>]...\n",
-                argv[0]);
+    char *owned_output = NULL;
+
+    for (int i = 1; i < argc;) {
+        const char *arg = argv[i++];
+        if (!stop_options && strcmp(arg, "--") == 0) {
+            stop_options = true;
+            continue;
+        }
+        if (!stop_options && (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0)) {
+            print_help(argv[0]);
+            free(native.objects);
+            return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
+        }
+        if (!stop_options && (strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0)) {
+            puts("lunso-boot 0.1.0");
+            free(native.objects);
+            return fflush(stdout) == EOF || ferror(stdout) ? EXIT_FAILURE : EXIT_SUCCESS;
+        }
+        Mode parsed_mode;
+        if (!stop_options && try_parse_mode(arg, &parsed_mode)) {
+            if (mode_set) {
+                fprintf(stderr, "conflicting mode option: %s\n", arg);
+                print_usage(stderr, argv[0]);
+                free(native.objects);
+                return EXIT_FAILURE;
+            }
+            mode = parsed_mode;
+            mode_set = true;
+            continue;
+        }
+        if (!stop_options && strncmp(arg, "--std=", sizeof("--std=") - 1) == 0) {
+            if (!set_std_dir(arg + sizeof("--std=") - 1, &std_dir)) {
+                free(native.objects);
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+        if (!stop_options && strcmp(arg, "--std") == 0) {
+            if (i >= argc || !set_std_dir(argv[i++], &std_dir)) {
+                if (i > argc || !std_dir) {
+                    print_usage(stderr, argv[0]);
+                }
+                free(native.objects);
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+        if (!stop_options && strcmp(arg, "-o") == 0) {
+            if (i >= argc || native.output) {
+                fputs(native.output ? "-o can only be supplied once\n" : "-o requires an output path\n",
+                      stderr);
+                print_usage(stderr, argv[0]);
+                free(native.objects);
+                return EXIT_FAILURE;
+            }
+            native.output = argv[i++];
+            continue;
+        }
+        if (!stop_options && strcmp(arg, "--link") == 0) {
+            if (i >= argc) {
+                fputs("--link requires an object path\n", stderr);
+                print_usage(stderr, argv[0]);
+                free(native.objects);
+                return EXIT_FAILURE;
+            }
+            if (!native.objects) {
+                native.objects = calloc((size_t)argc, sizeof(*native.objects));
+                if (!native.objects) {
+                    fputs("could not allocate link options\n", stderr);
+                    return EXIT_FAILURE;
+                }
+            }
+            native.objects[native.object_count++] = argv[i++];
+            continue;
+        }
+        if (!stop_options && arg[0] == '-' && arg[1] != '\0') {
+            fprintf(stderr, "unknown option: %s\n", arg);
+            print_usage(stderr, argv[0]);
+            free(native.objects);
+            return EXIT_FAILURE;
+        }
+        if (path) {
+            fprintf(stderr, "unexpected extra input file: %s\n", arg);
+            print_usage(stderr, argv[0]);
+            free(native.objects);
+            return EXIT_FAILURE;
+        }
+        path = arg;
+    }
+
+    if (!path) {
+        print_usage(stderr, argv[0]);
         free(native.objects);
         return EXIT_FAILURE;
     }
+    if (mode != MODE_BUILD && (native.output != NULL || native.object_count > 0)) {
+        fputs("-o and --link are only supported with --build\n", stderr);
+        print_usage(stderr, argv[0]);
+        free(native.objects);
+        return EXIT_FAILURE;
+    }
+    if (mode == MODE_BUILD && !native.output) {
+        owned_output = default_output_name(path);
+        if (!owned_output) {
+            fputs("could not allocate output path\n", stderr);
+            free(native.objects);
+            return EXIT_FAILURE;
+        }
+        native.output = owned_output;
+    }
 
     int result = run_source(mode, path, &native, std_dir);
+    free(owned_output);
     free(native.objects);
     return result;
 }

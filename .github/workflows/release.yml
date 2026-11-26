@@ -23,10 +23,27 @@ jobs:
       - name: Build and test
         run: make test
 
+      - name: Build static release binaries
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG="lunso-boot-${VERSION}-linux-x86_64"
+          make clean
+          make all build/std-linux-x86_64.o CFLAGS="-std=c11 -Wall -Wextra -Wpedantic -O2 -static"
+          strip build/lunso
+          mkdir -p "dist/${PKG}" dist/assets
+          cp build/lunso "dist/${PKG}/lunso"
+          cp build/std-linux-x86_64.o "dist/${PKG}/std-linux-x86_64.o"
+          cp -r std "dist/${PKG}/std"
+          cp LICENSE README.md "dist/${PKG}/"
+          cp build/lunso "dist/assets/lunso-linux-x86_64"
+          tar -C dist -czf "dist/assets/${PKG}.tar.gz" "${PKG}"
+          (cd dist/assets && sha256sum "${PKG}.tar.gz" "lunso-linux-x86_64" > SHA256SUMS.txt)
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            dist/assets/* \
             --title "lunso-boot ${GITHUB_REF_NAME#v}" \
             --generate-notes

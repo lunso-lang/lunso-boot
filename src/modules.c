@@ -684,12 +684,19 @@ static bool resolve_references(Loader *loader, uint32_t owner, AstNodeId first, 
                 return false;
             }
         } else if (ast->kinds[id] == AST_CALL ||
+                   ast->kinds[id] == AST_GENERIC_TYPE ||
                    (ast->kinds[id] == AST_MEMBER && !member_prefixes[id - first])) {
             bool call = ast->kinds[id] == AST_CALL;
-            uint32_t start = member_path(ast, call ? ast->children[node.a] : id, parts);
+            bool type = ast->kinds[id] == AST_GENERIC_TYPE;
+            AstNodeId base = call || type ? ast->children[node.a] : id;
+            if (ast->kinds[base] == AST_GENERIC_CALLEE) {
+                base = ast->children[ast->data[base].a];
+            }
+            uint32_t start = member_path(ast, base, parts);
             uint32_t count = MAX_MODULE_DEPTH - start;
-            if (call) {
-                if (count >= 2 && !qualify(loader, owner, id, parts + start, count, BIND_FUNCTION)) {
+            if (call || type) {
+                if (count >= 2 && !qualify(loader, owner, id, parts + start, count,
+                                           call ? BIND_FUNCTION : BIND_STRUCT)) {
                     return false;
                 }
             } else {
@@ -745,7 +752,8 @@ static bool finish_module(Loader *loader, uint32_t module, AstNodeId first, uint
         AstNodeId prefix;
         if (ast->kinds[id] == AST_MEMBER) {
             prefix = ast->data[id].a;
-        } else if (ast->kinds[id] == AST_CALL) {
+        } else if (ast->kinds[id] == AST_CALL || ast->kinds[id] == AST_GENERIC_TYPE ||
+                   ast->kinds[id] == AST_GENERIC_CALLEE) {
             prefix = ast->children[ast->data[id].a];
         } else {
             continue;

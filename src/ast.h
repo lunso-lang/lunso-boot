@@ -33,6 +33,7 @@ enum {
     AST_QUALIFIED_TYPE, // a: first path component in children, b: component count
     AST_ARRAY_TYPE, // a: element type, b: length literal or AST_NODE_NONE for a slice
     AST_POINTER_TYPE, // a: pointee type, b: read-only qualifier
+    AST_GENERIC_TYPE, // a: first child, b: count (type name then type arguments)
 
     AST_BLOCK,   // a: first item in children, b: item count
     AST_RETURN,  // a: value node or AST_NODE_NONE
@@ -53,6 +54,7 @@ enum {
     AST_STRUCT_LITERAL,      // a: first item in children, b: item count (type, then field inits)
     AST_STRUCT_FIELD_INIT,   // a: field name length, b: value node
     AST_CALL,        // a: first item in children, b: item count (callee, then arguments)
+    AST_GENERIC_CALLEE, // a: first child, b: count (callee then type arguments)
     AST_INDEX,       // a: base node, b: index expression node
     AST_SLICE,       // a: base node, b: range node
     AST_SLICE_RANGE, // a: start expression, b: end expression
@@ -112,6 +114,8 @@ _Static_assert(sizeof(AstNodeData) == 8, "AST node data must occupy eight bytes"
 typedef struct {
     AstSpan name;
     AstNodeRange parameters;  // Range in children.
+    AstNodeRange type_parameters;
+    AstNodeRange nodes;       // Function's contiguous original syntax nodes.
     AstNodeId return_type;    // AST_NODE_NONE for a function without a result.
     AstNodeId body;           // AST_NODE_NONE for an external function.
     uint32_t module;
@@ -121,6 +125,7 @@ typedef struct {
 typedef struct {
     AstSpan name;
     AstNodeRange fields;  // Range in children.
+    AstNodeRange type_parameters;
     uint32_t module;
     bool public;
 } AstStruct;

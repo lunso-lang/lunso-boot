@@ -207,6 +207,38 @@ static void close_group(Parser *parser, TokenKind kind, const char *message)
     expect(parser, kind, message);
 }
 
+static AstNodeId parse_type_application(Parser *parser, AstKind kind, AstNodeId base)
+{
+    Token opening = parser->current;
+    uint32_t mark = parser->builder->pending_count;
+    push_child(parser, base);
+    open_group(parser);
+    do {
+        push_child(parser, parse_type(parser));
+    } while (match(parser, TOKEN_COMMA) && parser->current.kind != TOKEN_RIGHT_BRACKET);
+    close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after type arguments");
+    AstNodeRange items = finish_children(parser, mark);
+    return add_node(parser, kind, opening, items.first, items.count);
+}
+
+static bool bracket_before_initializer(const Parser *parser)
+{
+    Lexer lexer = parser->lexer;
+    unsigned depth = 1;
+    while (depth) {
+        TokenKind kind = read_token(&lexer, true).kind;
+        if (kind == TOKEN_EOF) {
+            return false;
+        }
+        if (kind == TOKEN_LEFT_BRACKET) {
+            depth++;
+        } else if (kind == TOKEN_RIGHT_BRACKET) {
+            depth--;
+        }
+    }
+    return read_token(&lexer, parser->group_depth != 0).kind == TOKEN_LEFT_BRACE;
+}
+
 static AstNodeId parse_call(Parser *parser, AstNodeId callee)
 {
     Token opening = parser->current;
@@ -285,13 +317,20 @@ static AstNodeId parse_postfix(Parser *parser, AstNodeId base)
         case TOKEN_LEFT_BRACE: {
             AstKind base_kind = base ? parser->builder->ast.kinds[base] : AST_INVALID;
             if (parser->disallow_struct_literal ||
-                (base_kind != AST_IDENTIFIER && base_kind != AST_MEMBER)) {
+                (base_kind != AST_IDENTIFIER && base_kind != AST_MEMBER && base_kind != AST_GENERIC_TYPE)) {
                 return base;
             }
             base = parse_struct_literal(parser, base);
             break;
         }
         case TOKEN_LEFT_BRACKET: {
+            AstKind base_kind = parser->builder->ast.kinds[base];
+            if (!parser->disallow_struct_literal &&
+                (base_kind == AST_IDENTIFIER || base_kind == AST_MEMBER) &&
+                bracket_before_initializer(parser)) {
+                base = parse_type_application(parser, AST_GENERIC_TYPE, base);
+                break;
+            }
             open_group(parser);
             AstNodeId index = parse_expression(parser, PREC_ASSIGNMENT);
             if (parser->current.kind == TOKEN_DOT_DOT && !failed(parser)) {
@@ -309,6 +348,16 @@ static AstNodeId parse_postfix(Parser *parser, AstNodeId base)
         }
         case TOKEN_DOT: {
             advance(parser);
+            if (parser->current.kind == TOKEN_LEFT_BRACKET) {
+                base = parse_type_application(parser, AST_GENERIC_CALLEE, base);
+                if (!failed(parser) && parser->current.kind != TOKEN_LEFT_PAREN) {
+                    fail(parser, "expected '(' after generic function type arguments");
+                }
+                if (!failed(parser)) {
+                    base = parse_call(parser, base);
+                }
+                break;
+            }
             Token member = expect(parser, TOKEN_IDENTIFIER, "expected member name after '.'");
             base = add_node(parser, AST_MEMBER, member, base, (uint32_t)member.length);
             break;
@@ -530,7 +579,11 @@ static AstNodeId parse_type_inner(Parser *parser)
         return add_node(parser, AST_POINTER_TYPE, opening, pointee, read_only);
     }
     if (opening.kind != TOKEN_LEFT_BRACKET) {
-        return parse_type_name(parser);
+        AstNodeId base = parse_type_name(parser);
+        if (!failed(parser) && parser->current.kind == TOKEN_LEFT_BRACKET) {
+            return parse_type_application(parser, AST_GENERIC_TYPE, base);
+        }
+        return base;
     }
     open_group(parser);
     AstNodeId count = AST_NODE_NONE;
@@ -745,6 +798,21 @@ static AstSpan source_span(const Parser *parser, Token token)
     return (AstSpan){parser->source_base + (uint32_t)token.offset, (uint32_t)token.length};
 }
 
+static AstNodeRange parse_type_parameters(Parser *parser)
+{
+    if (parser->current.kind != TOKEN_LEFT_BRACKET) {
+        return (AstNodeRange){0};
+    }
+    uint32_t mark = parser->builder->pending_count;
+    open_group(parser);
+    do {
+        Token name = expect(parser, TOKEN_IDENTIFIER, "expected a type parameter name");
+        push_child(parser, add_node(parser, AST_IDENTIFIER, name, (uint32_t)name.length, 0));
+    } while (match(parser, TOKEN_COMMA) && parser->current.kind != TOKEN_RIGHT_BRACKET);
+    close_group(parser, TOKEN_RIGHT_BRACKET, "expected ']' after type parameters");
+    return finish_children(parser, mark);
+}
+
 static AstNodeId parse_function(Parser *parser, bool public)
 {
     Token start = parser->current;
@@ -752,9 +820,12 @@ static AstNodeId parse_function(Parser *parser, bool public)
     expect(parser, TOKEN_FUN, external ? "expected 'fun' after 'ext'"
                                       : "expected a function declaration");
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a function name");
+    uint32_t first_node = parser->builder->ast.node_count;
+    AstNodeRange type_parameters = parse_type_parameters(parser);
     AstFunction function = {
         .name = source_span(parser, name),
         .parameters = parse_parameters(parser),
+        .type_parameters = type_parameters,
         .module = parser->module,
         .public = public,
     };
@@ -766,6 +837,7 @@ static AstNodeId parse_function(Parser *parser, bool public)
     } else if (parser->current.kind == TOKEN_LEFT_BRACE) {
         fail(parser, "an external function declaration cannot have a body");
     }
+    function.nodes = (AstNodeRange){first_node, parser->builder->ast.node_count - first_node};
 
     uint32_t index = 0;
     if (!failed(parser) && !ast_add_function(parser->builder, function, &index)) {
@@ -778,6 +850,7 @@ static AstNodeId parse_struct(Parser *parser, bool public)
 {
     Token keyword = expect(parser, TOKEN_STRUCT, "expected 'struct'");
     Token name = expect(parser, TOKEN_IDENTIFIER, "expected a struct name");
+    AstNodeRange type_parameters = parse_type_parameters(parser);
     expect(parser, TOKEN_LEFT_BRACE, "expected '{' after struct name");
     uint32_t mark = parser->builder->pending_count;
     while (!failed(parser) && is_separator(parser->current.kind)) {
@@ -798,6 +871,7 @@ static AstNodeId parse_struct(Parser *parser, bool public)
     AstStruct record = {
         .name = source_span(parser, name),
         .fields = finish_children(parser, mark),
+        .type_parameters = type_parameters,
         .module = parser->module,
         .public = public,
     };

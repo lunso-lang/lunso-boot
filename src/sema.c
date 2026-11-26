@@ -1496,14 +1496,12 @@ static AddressAccess address_access(const Checker *checker, AstNodeId id)
     }
     while (ast->kinds[id] == AST_MEMBER || ast->kinds[id] == AST_INDEX) {
         AstNodeId base = ast->data[id].a;
-        if (ast->kinds[id] == AST_INDEX) {
-            SemaType type = checked_node(checker, base)->type;
-            if (type.kind == TYPE_POINTER) {
-                return type.read_only ? READ_ONLY_ADDRESS : WRITABLE_ADDRESS;
-            }
-            if (type.kind == TYPE_SLICE) {
-                return READ_ONLY_ADDRESS;
-            }
+        SemaType type = checked_node(checker, base)->type;
+        if (type.kind == TYPE_POINTER) {
+            return type.read_only ? READ_ONLY_ADDRESS : WRITABLE_ADDRESS;
+        }
+        if (ast->kinds[id] == AST_INDEX && type.kind == TYPE_SLICE) {
+            return READ_ONLY_ADDRESS;
         }
         id = base;
     }
@@ -1696,6 +1694,9 @@ static SemaType check_member(Checker *checker, AstNodeId id)
         return fail(checker, id, "unknown enum member");
     }
     SemaType base = value(checker, node.a, no_type);
+    if (base.kind == TYPE_POINTER) {
+        base = complete_type(checker, checker->sema->pointees[base.pointee]);
+    }
     if (base.kind != TYPE_STRUCT) {
         return fail(checker, id, "member access requires a struct value");
     }

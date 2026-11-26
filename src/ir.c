@@ -185,7 +185,11 @@ static uint32_t lower_memory_address(Lowering *lowering, AstNodeId id)
     if (kind == AST_DEREFERENCE) {
         return value;
     }
-    return emit_value(lowering, IR_FIELD_ADDRESS, lower_node(lowering, base)->type,
+    SemaType base_type = lower_node(lowering, base)->type;
+    if (base_type.kind == TYPE_POINTER) {
+        base_type = lowering->sema->pointees[base_type.pointee];
+    }
+    return emit_value(lowering, IR_FIELD_ADDRESS, base_type,
                       value, lower_node(lowering, id)->binding, 0);
 }
 

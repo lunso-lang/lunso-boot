@@ -30,7 +30,6 @@ fun main(): i32 {
 
     items[1].unit_price = 8
     items[1].stock = 4
-
     // One unit was sold from the first item.
     items[0].stock -= 1
 

@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "lexer.h"
 #include "parser.h"
 #include "sema.h"
@@ -11,8 +13,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-typedef enum { MODE_TOKENS, MODE_PARSE, MODE_CHECK, MODE_EMIT_IR, MODE_EMIT_QBE, MODE_BUILD } Mode;
+typedef enum {
+    MODE_TOKENS,
+    MODE_PARSE,
+    MODE_CHECK,
+    MODE_EMIT_IR,
+    MODE_EMIT_QBE,
+    MODE_EMIT_ASM,
+    MODE_EMIT_OBJ,
+    MODE_BUILD,
+    MODE_RUN,
+} Mode;
 
 static void print_lexeme(const unsigned char *bytes, size_t length)
 {
@@ -193,9 +206,11 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
     }
 
     bool ok = true;
+    bool produces_native = mode == MODE_BUILD || mode == MODE_RUN ||
+                           mode == MODE_EMIT_OBJ || mode == MODE_EMIT_ASM;
     if (mode == MODE_CHECK) {
         printf("Checked %" PRIu32 " function(s)\n", program.ast.function_count);
-    } else if (mode == MODE_BUILD && modules_output_overlaps(&program, native->output)) {
+    } else if (produces_native && modules_output_overlaps(&program, native->output)) {
         fprintf(stderr, "%s: output would overwrite the source file\n", native->output);
         ok = false;
     } else {
@@ -204,7 +219,7 @@ static int process_source(Mode mode, const char *path, const unsigned char *sour
             fprintf(stderr, "%s: could not allocate IR storage\n", path);
             ok = false;
         } else {
-            if (mode == MODE_BUILD) {
+            if (produces_native) {
                 ok = native_build(&ir, path, native);
             } else {
                 ok = mode == MODE_EMIT_IR ? ir_write(stdout, &ir) : qbe_write(stdout, &ir);
@@ -222,6 +237,7 @@ static void print_usage(FILE *out, const char *prog)
     fprintf(out, "usage: %s [options] <source.lunso>\n", prog);
     fprintf(out, "       %s --build [options] <source.lunso> [-o <executable>] [--link <object>]...\n",
             prog);
+    fprintf(out, "       %s --run [options] <source.lunso> [-- <args>...]\n", prog);
 }
 
 static void print_help(const char *prog)
@@ -233,40 +249,94 @@ static void print_help(const char *prog)
           "  --check          Run module loading and semantic checks\n"
           "  --emit-ir        Emit Lunso IR to stdout\n"
           "  --emit-qbe       Emit QBE IL to stdout\n"
+          "  --emit-asm       Emit assembly (.s) file\n"
+          "  -c, --emit-obj   Compile to an object (.o) file\n"
           "  --build          Compile and link a native executable\n"
+          "  --run            Compile to a temporary executable and run it\n"
           "\nOptions:\n"
           "  --std=<dir>      Override standard library directory\n"
           "  --std <dir>      Override standard library directory\n"
-          "  -o <file>        Output executable path (with --build; defaults to <stem>)\n"
-          "  --link <obj>     Link an additional object or archive (with --build)\n"
+          "  -o <file>        Output path (with --build, -c/--emit-obj, --emit-asm)\n"
+          "  --link <obj>     Link an additional object or archive (with --build/--run)\n"
+          "  -nostdlib        Link without standard C runtime/libraries\n"
           "  -h, --help       Show this help message and exit\n"
           "  -V, --version    Show compiler version and exit\n",
           stdout);
 }
 
-static char *default_output_name(const char *path)
+static char *default_output_name(const char *path, const char *suffix)
 {
     const char *slash = strrchr(path, '/');
     const char *base = slash ? slash + 1 : path;
     size_t len = strlen(base);
     static const char ext[] = ".lunso";
     size_t ext_len = sizeof(ext) - 1;
-    if (len > ext_len && strcmp(base + len - ext_len, ext) == 0) {
-        size_t stem_len = len - ext_len;
-        char *out = malloc(stem_len + 1);
-        if (out) {
-            memcpy(out, base, stem_len);
-            out[stem_len] = '\0';
-        }
-        return out;
-    }
-    static const char suffix[] = ".out";
-    char *out = malloc(len + sizeof(suffix));
+    size_t stem_len = (len > ext_len && strcmp(base + len - ext_len, ext) == 0) ? (len - ext_len) : len;
+    const char *use_suffix = suffix ? suffix : (stem_len < len ? "" : ".out");
+    size_t suf_len = strlen(use_suffix);
+    char *out = malloc(stem_len + suf_len + 1);
     if (out) {
-        memcpy(out, base, len);
-        memcpy(out + len, suffix, sizeof(suffix));
+        memcpy(out, base, stem_len);
+        memcpy(out + stem_len, use_suffix, suf_len);
+        out[stem_len + suf_len] = '\0';
     }
     return out;
+}
+
+static char *join_two(const char *a, const char *b)
+{
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    char *out = malloc(la + lb + 1);
+    if (out) {
+        memcpy(out, a, la);
+        memcpy(out + la, b, lb);
+        out[la + lb] = '\0';
+    }
+    return out;
+}
+
+static bool has_std_object_linked(const NativeOptions *native)
+{
+    static const char std_name[] = "std-linux-x86_64.o";
+    size_t slen = sizeof(std_name) - 1;
+    for (size_t i = 0; i < native->object_count; i++) {
+        const char *obj = native->objects[i];
+        size_t olen = strlen(obj);
+        if (olen >= slen && strcmp(obj + olen - slen, std_name) == 0 &&
+            (olen == slen || obj[olen - slen - 1] == '/')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static char *resolve_std_object(const char *std_dir)
+{
+    const char *env = getenv("LUNSO_STD_OBJ");
+    if (env && *env) {
+        return strdup(env);
+    }
+#ifdef LUNSO_STD_DIR
+    const char *bases[2] = {std_dir, LUNSO_STD_DIR};
+#else
+    const char *bases[2] = {std_dir, NULL};
+#endif
+    static const char *const suffixes[] = {
+        "/../build/std-linux-x86_64.o",
+        "/std-linux-x86_64.o",
+    };
+    for (size_t b = 0; b < 2; b++) {
+        if (!bases[b] || !*bases[b]) continue;
+        for (size_t s = 0; s < 2; s++) {
+            char *candidate = join_two(bases[b], suffixes[s]);
+            if (candidate && access(candidate, R_OK) == 0) {
+                return candidate;
+            }
+            free(candidate);
+        }
+    }
+    return NULL;
 }
 
 static bool set_std_dir(const char *path, const char **std_dir)
@@ -323,8 +393,20 @@ static bool try_parse_mode(const char *argument, Mode *out_mode)
         *out_mode = MODE_EMIT_QBE;
         return true;
     }
+    if (strcmp(argument, "--emit-asm") == 0) {
+        *out_mode = MODE_EMIT_ASM;
+        return true;
+    }
+    if (strcmp(argument, "-c") == 0 || strcmp(argument, "--emit-obj") == 0) {
+        *out_mode = MODE_EMIT_OBJ;
+        return true;
+    }
     if (strcmp(argument, "--build") == 0) {
         *out_mode = MODE_BUILD;
+        return true;
+    }
+    if (strcmp(argument, "--run") == 0) {
+        *out_mode = MODE_RUN;
         return true;
     }
     return false;
@@ -337,13 +419,21 @@ int main(int argc, char **argv)
     Mode mode = MODE_TOKENS;
     bool mode_set = false;
     bool stop_options = false;
+    int run_argc = 0;
+    char *const *run_argv = NULL;
     NativeOptions native = {0};
     char *owned_output = NULL;
+    char *auto_std_obj = NULL;
 
     for (int i = 1; i < argc;) {
         const char *arg = argv[i++];
         if (!stop_options && strcmp(arg, "--") == 0) {
             stop_options = true;
+            if (mode == MODE_RUN && path) {
+                run_argc = argc - i;
+                run_argv = argv + i;
+                break;
+            }
             continue;
         }
         if (!stop_options && (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0)) {
@@ -366,6 +456,10 @@ int main(int argc, char **argv)
             }
             mode = parsed_mode;
             mode_set = true;
+            continue;
+        }
+        if (!stop_options && (strcmp(arg, "-nostdlib") == 0 || strcmp(arg, "--nostdlib") == 0)) {
+            native.nostdlib = true;
             continue;
         }
         if (!stop_options && strncmp(arg, "--std=", sizeof("--std=") - 1) == 0) {
@@ -404,7 +498,7 @@ int main(int argc, char **argv)
                 return EXIT_FAILURE;
             }
             if (!native.objects) {
-                native.objects = calloc((size_t)argc, sizeof(*native.objects));
+                native.objects = calloc((size_t)argc + 1, sizeof(*native.objects));
                 if (!native.objects) {
                     fputs("could not allocate link options\n", stderr);
                     return EXIT_FAILURE;
@@ -433,24 +527,96 @@ int main(int argc, char **argv)
         free(native.objects);
         return EXIT_FAILURE;
     }
-    if (mode != MODE_BUILD && (native.output != NULL || native.object_count > 0)) {
-        fputs("-o and --link are only supported with --build\n", stderr);
+    bool allows_output = mode == MODE_BUILD || mode == MODE_EMIT_OBJ || mode == MODE_EMIT_ASM;
+    bool allows_link = mode == MODE_BUILD || mode == MODE_RUN;
+    if ((!allows_output && native.output != NULL) ||
+        (!allows_link && (native.object_count > 0 || native.nostdlib))) {
+        fputs("-o, --link, and -nostdlib require a compatible build/run mode\n", stderr);
         print_usage(stderr, argv[0]);
         free(native.objects);
         return EXIT_FAILURE;
     }
-    if (mode == MODE_BUILD && !native.output) {
-        owned_output = default_output_name(path);
-        if (!owned_output) {
-            fputs("could not allocate output path\n", stderr);
+
+    if (mode == MODE_EMIT_OBJ) {
+        native.kind = NATIVE_OBJ;
+        if (!native.output) {
+            owned_output = default_output_name(path, ".o");
+            native.output = owned_output;
+        }
+    } else if (mode == MODE_EMIT_ASM) {
+        native.kind = NATIVE_ASM;
+        if (!native.output) {
+            owned_output = default_output_name(path, ".s");
+            native.output = owned_output;
+        }
+    } else if (mode == MODE_BUILD) {
+        native.kind = NATIVE_EXE;
+        if (!native.output) {
+            owned_output = default_output_name(path, NULL);
+            native.output = owned_output;
+        }
+    } else if (mode == MODE_RUN) {
+        native.kind = NATIVE_EXE;
+    }
+
+    if (allows_link && !native.nostdlib && !has_std_object_linked(&native)) {
+        auto_std_obj = resolve_std_object(std_dir);
+        if (auto_std_obj) {
+            if (!native.objects) {
+                native.objects = calloc(2, sizeof(*native.objects));
+            }
+            if (native.objects) {
+                native.objects[native.object_count++] = auto_std_obj;
+            }
+        }
+    }
+
+    if (mode == MODE_RUN) {
+        const char *tmp_base = getenv("TMPDIR");
+        if (!tmp_base || !*tmp_base) {
+            tmp_base = "/tmp";
+        }
+        char *tmpl = join_two(tmp_base, "/lunso-run-XXXXXX");
+        if (!tmpl || !mkdtemp(tmpl)) {
+            perror(tmpl ? tmpl : "mkdtemp");
+            free(tmpl);
+            free(auto_std_obj);
             free(native.objects);
             return EXIT_FAILURE;
         }
-        native.output = owned_output;
+        char *prog = join_two(tmpl, "/program");
+        if (!prog) {
+            fputs("could not allocate temporary run path\n", stderr);
+            rmdir(tmpl);
+            free(tmpl);
+            free(auto_std_obj);
+            free(native.objects);
+            return EXIT_FAILURE;
+        }
+        native.output = prog;
+        int result = run_source(mode, path, &native, std_dir);
+        if (result == EXIT_SUCCESS) {
+            result = native_run(prog, run_argc, run_argv);
+        }
+        unlink(prog);
+        rmdir(tmpl);
+        free(prog);
+        free(tmpl);
+        free(auto_std_obj);
+        free(native.objects);
+        return result;
+    }
+
+    if ((mode == MODE_BUILD || mode == MODE_EMIT_OBJ || mode == MODE_EMIT_ASM) && !native.output) {
+        fputs("could not allocate output path\n", stderr);
+        free(auto_std_obj);
+        free(native.objects);
+        return EXIT_FAILURE;
     }
 
     int result = run_source(mode, path, &native, std_dir);
     free(owned_output);
+    free(auto_std_obj);
     free(native.objects);
     return result;
 }

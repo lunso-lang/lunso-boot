@@ -265,6 +265,50 @@ class TestCliOptions(unittest.TestCase):
             run_res = run_cmd([default_exe], cwd=workdir)
             self.assertEqual(run_res.returncode, 42)
 
+    def test_run_mode_auto_std_and_obj_asm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workdir = Path(tmp)
+            # --run without --link (auto-links std-linux-x86_64.o)
+            run_ans = run_cmd([LUNSO, "--run", ROOT / "examples" / "answer.lunso"], cwd=workdir)
+            self.assertEqual(run_ans.returncode, 42, run_ans.stderr)
+
+            run_arena = run_cmd([LUNSO, "--run", ROOT / "examples" / "arena.lunso"], cwd=workdir)
+            self.assertEqual(run_arena.returncode, 0, run_arena.stderr)
+
+            # --run with forwarded args after --
+            arg_prog = workdir / "echo_args.lunso"
+            arg_prog.write_text(
+                "import std.args\n"
+                "import std.io\n"
+                "import std.mem\n"
+                "fun main(): i32 {\n"
+                "    var arena: mem.Arena\n"
+                "    if mem.init(&arena, 4096) < 0 { return 1 }\n"
+                "    var list: [][]u8\n"
+                "    if args.load(&arena, &list) < 0 { return 2 }\n"
+                "    if len(list) != 3 { return 3 }\n"
+                "    io.println(list[1])\n"
+                "    io.println(list[2])\n"
+                "    mem.deinit(&arena)\n"
+                "    return 0\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            run_args = run_cmd([LUNSO, "--run", arg_prog, "--", "hello", "world"], cwd=workdir)
+            self.assertEqual(run_args.returncode, 0, run_args.stderr)
+            self.assertEqual(run_args.stdout, "hello\nworld\n")
+
+            # -c / --emit-obj and --emit-asm on a library module without main
+            lib = workdir / "lib.lunso"
+            lib.write_text("pub fun add_one(x: i32): i32 { return x + 1 }\n", encoding="utf-8")
+            obj_res = run_cmd([LUNSO, "-c", lib], cwd=workdir)
+            self.assertEqual(obj_res.returncode, 0, obj_res.stderr)
+            self.assertTrue((workdir / "lib.o").exists())
+
+            asm_res = run_cmd([LUNSO, "--emit-asm", lib], cwd=workdir)
+            self.assertEqual(asm_res.returncode, 0, asm_res.stderr)
+            self.assertTrue((workdir / "lib.s").exists())
+
 
 if __name__ == "__main__":
     if not LUNSO.exists() or not STD_OBJ.exists():

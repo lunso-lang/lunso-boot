@@ -163,43 +163,57 @@ static bool check_link_inputs(const NativeOptions *options)
 static bool link_program(const NativeOptions *options, char *assembly, char *program)
 {
     size_t count = options->object_count;
-    if (count > (SIZE_MAX / sizeof(char *) - 5) / 2) {
+    size_t extra = options->nostdlib ? 1 : 0;
+    if (count > (SIZE_MAX / sizeof(char *) - 6 - extra) / 2) {
         fputs("too many link inputs\n", stderr);
         return false;
     }
-    char **args = calloc(5 + count * 2, sizeof(*args));
+    char **args = calloc(5 + extra + count * 2, sizeof(*args));
     if (!args) {
         fputs("could not allocate linker arguments\n", stderr);
         return false;
     }
     char *cc = getenv("CC");
-    args[0] = cc && *cc ? cc : "cc";
-    args[1] = assembly;
+    size_t idx = 0;
+    args[idx++] = cc && *cc ? cc : "cc";
+    if (options->nostdlib) {
+        args[idx++] = "-nostdlib";
+    }
+    args[idx++] = assembly;
     size_t i = 0;
     for (; i < count; i++) {
         const char *path = options->objects[i];
-        args[2 + i * 2] = "-Xlinker";
+        args[idx++] = "-Xlinker";
         // Give the linker a file operand even if the relative path starts with '-' or '@'.
-        args[3 + i * 2] = path[0] == '/' ? strdup(path) : join_path("./", path);
-        if (!args[3 + i * 2]) {
+        char *operand = path[0] == '/' ? strdup(path) : join_path("./", path);
+        args[idx++] = operand;
+        if (!operand) {
             fputs("could not allocate a link input path\n", stderr);
             break;
         }
     }
-    args[2 + count * 2] = "-o";
-    args[3 + count * 2] = program;
+    args[idx++] = "-o";
+    args[idx++] = program;
     bool ok = i == count && run_tool(args);
+    size_t base = 2 + extra;
     for (size_t j = 0; j < i; j++) {
-        free(args[3 + j * 2]);
+        free(args[base + j * 2 + 1]);
     }
     free(args);
     return ok;
 }
 
+static bool assemble_object(char *assembly, char *object)
+{
+    char *cc = getenv("CC");
+    char *args[] = {cc && *cc ? cc : "cc", "-c", assembly, "-o", object, NULL};
+    return run_tool(args);
+}
+
 bool native_build(const IrModule *module, const char *source, const NativeOptions *options)
 {
     const char *output = options->output;
-    if (!has_entry_point(module)) {
+    if (options->kind == NATIVE_EXE && !has_entry_point(module)) {
         fprintf(stderr, "%s: expected entry point 'fun main(): i32'\n", source);
         return false;
     }
@@ -211,7 +225,7 @@ bool native_build(const IrModule *module, const char *source, const NativeOption
         fprintf(stderr, "%s: output would overwrite the source file\n", output);
         return false;
     }
-    if (!check_link_inputs(options)) {
+    if (options->kind == NATIVE_EXE && !check_link_inputs(options)) {
         return false;
     }
 
@@ -222,21 +236,67 @@ bool native_build(const IrModule *module, const char *source, const NativeOption
     }
     char *il = join_path(directory, "/module.ssa");
     char *assembly = join_path(directory, "/module.s");
-    char *program = join_path(directory, "/program");
+    char *out_tmp = options->kind == NATIVE_ASM ? NULL
+                                                : join_path(directory, options->kind == NATIVE_OBJ ? "/module.o" : "/program");
     bool ok = false;
-    if (!il || !assembly || !program) {
+    if (!il || !assembly || (options->kind != NATIVE_ASM && !out_tmp)) {
         fprintf(stderr, "%s: could not allocate output paths\n", output);
     } else {
         char *qbe = getenv("QBE");
         char *qbe_args[] = {qbe && *qbe ? qbe : "qbe", "-o", assembly, il, NULL};
-        ok = write_il(module, il) && run_tool(qbe_args) &&
-             link_program(options, assembly, program) && publish(program, output);
+        if (write_il(module, il) && run_tool(qbe_args)) {
+            if (options->kind == NATIVE_ASM) {
+                ok = publish(assembly, output);
+            } else if (options->kind == NATIVE_OBJ) {
+                ok = assemble_object(assembly, out_tmp) && publish(out_tmp, output);
+            } else {
+                ok = link_program(options, assembly, out_tmp) && publish(out_tmp, output);
+            }
+        }
     }
 
     remove_temporary(il);
     remove_temporary(assembly);
-    remove_temporary(program);
+    remove_temporary(out_tmp);
     rmdir(directory);
     free(directory);
     return ok;
+}
+
+int native_run(const char *program, int argc, char *const *argv)
+{
+    size_t extra = argc > 0 ? (size_t)argc : 0;
+    char **args = calloc(extra + 2, sizeof(*args));
+    if (!args) {
+        fputs("could not allocate run arguments\n", stderr);
+        return EXIT_FAILURE;
+    }
+    args[0] = (char *)program;
+    for (size_t i = 0; i < extra; i++) {
+        args[i + 1] = argv[i];
+    }
+    pid_t child;
+    int spawn_error = posix_spawnp(&child, program, NULL, NULL, args, environ);
+    free(args);
+    if (spawn_error) {
+        fprintf(stderr, "%s: could not run: %s\n", program, strerror(spawn_error));
+        return EXIT_FAILURE;
+    }
+
+    int status;
+    pid_t result;
+    do {
+        result = waitpid(child, &status, 0);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) {
+        perror(program);
+        return EXIT_FAILURE;
+    }
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    if (WIFSIGNALED(status)) {
+        return 128 + WTERMSIG(status);
+    }
+    return EXIT_FAILURE;
 }
